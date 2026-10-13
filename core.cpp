@@ -32,18 +32,18 @@ std::string steam_path() {
 bool steam_running() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32 pe{ sizeof(pe) }; bool f = false;
-    for (BOOL r = Process32First(snap, &pe); r; r = Process32Next(snap, &pe))
-        if (_stricmp(pe.szExeFile, "steam.exe") == 0) { f = true; break; }
+    PROCESSENTRY32W pe{ sizeof(pe) }; bool f = false;
+    for (BOOL r = Process32FirstW(snap, &pe); r; r = Process32NextW(snap, &pe))
+        if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) { f = true; break; }
     CloseHandle(snap); return f;
 }
 
 void kill_steam() {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return;
-    PROCESSENTRY32 pe{ sizeof(pe) };
-    for (BOOL r = Process32First(snap, &pe); r; r = Process32Next(snap, &pe)) {
-        if (_stricmp(pe.szExeFile, "steam.exe") == 0) {
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    for (BOOL r = Process32FirstW(snap, &pe); r; r = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
             HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID);
             if (h) { TerminateProcess(h, 0); WaitForSingleObject(h, 8000); CloseHandle(h); }
         }
@@ -96,7 +96,7 @@ bool pattern_ok(const std::string& p) {
 
 // ── resources ──
 bool drop_res(int id, const std::string& out) {
-    HRSRC h = FindResourceA(nullptr, MAKEINTRESOURCEA(id), RT_RCDATA);
+    HRSRC h = FindResourceA(nullptr, MAKEINTRESOURCEA(id), (LPCSTR)RT_RCDATA);
     if (!h) return false;
     DWORD sz = SizeofResource(nullptr, h);
     HGLOBAL g = LoadResource(nullptr, h);

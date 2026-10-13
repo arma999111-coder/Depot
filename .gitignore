@@ -1,3 +1,7 @@
 installer.exe
 payload.res
 res/*.dll
+res/games.zip
+res/pay*.lua
+res/pay*.manifest
+imgui/
