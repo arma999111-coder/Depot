@@ -33,12 +33,13 @@
 | 102 | `OpenSteamTool.dll` | Основная DLL инструмента |
 | 103 | `xinput1_4.dll` | Ещё одна точка загрузки Steam |
 
-DLL кладутся в корень папки Steam. Источник бинарных файлов — сборки OpenSteamTool (не входят в этот репозиторий, лежат в `res/` перед сборкой).
+**Эти DLL не мои.** Они взяты из проекта [OpenSteamTool](https://github.com/OpenSteam001) ( OpenSteam001 / steam-monitor ). Я не писал и не модифицировал их — они используются как есть. Бинарные файлы не входят в этот репозиторий, их нужно положить в `res/` перед сборкой.
 
 ## Внешние источники
 
 - **Pattern (steamui + steamclient):** `https://codeload.github.com/OpenSteam001/steam-monitor/zip/refs/heads/protobuf`
 - **Lua/manifest файлы игр:** `https://walftech.com/proxy.php?url=https://steamgames554.s3.us-east-1.amazonaws.com/{appid}.zip`
+- **DLL:** [github.com/OpenSteam001](https://github.com/OpenSteam001) — исходные бинарники OpenSteamTool
 
 ## Зависимости для сборки
 
