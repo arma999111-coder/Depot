@@ -10,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <functional>
+#include <algorithm>
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -17,6 +18,7 @@
 #include "games.h"
 #include <gdiplus.h>
 #include <wininet.h>
+#include <shellapi.h>
 #include <cmath>
 #include <map>
 #include <set>
@@ -36,6 +38,17 @@ static UINT                    g_ResizeWidth = 0, g_ResizeHeight = 0;
 
 // ── app state ──
 static std::atomic<bool> g_busy{false};
+// ── красивый экран установки ──
+static bool g_showInstall = false;
+static std::string g_installName;
+static std::string g_installAppid;
+static double g_installDoneT = 0.0;
+static float g_installShown = 0.0f;
+static const char* install_name(const std::string& appid) {
+    for (int i = 0; i < kGamesCount; i++)
+        if (appid == kGames[i].appid) return kGames[i].name;
+    return nullptr;
+}
 static int g_lang_gui = 0;
 static const char* tg(const char* ru, const char* en) { return g_lang_gui ? en : ru; }
 
@@ -59,6 +72,8 @@ static float g_selX = 0, g_selY0 = 0, g_selY1 = 0, g_indY0 = 0, g_indH0 = 0;
 static bool g_indInit = false;
 static char g_searchBuf[64] = "";
 static int g_catSel = 0; // индекс в kCats
+static int g_sort = 0; // 0 = по имени, 1 = по AppID
+static bool g_onlyInst = false; // только установленные
 
 // ── новости обновлений ──
 struct NewsItem {
@@ -70,6 +85,66 @@ struct NewsItem {
 };
 
 static const NewsItem kNews[] = {
+    { "v6.1", "14.10.2026",
+      { "Паттерн теперь из правильной ветки (были .proto вместо сигнатур)",
+        "Добавлена загрузка IPC-спеков (убирает третью ошибку)",
+        "Бейдж PATTERN честный: считает только .toml",
+        "Важно: для Steam Build 1791918634 сигнатур пока нет в апстриме" },
+      { "Pattern now from the right branch (.proto mix-up fixed)",
+        "IPC specs download added (fixes the third error)",
+        "Honest PATTERN badge: counts only .toml",
+        "Heads-up: no upstream signatures for Steam Build 1791918634 yet" },
+      4 },
+    { "v6.0", "14.10.2026",
+      { "Каталог ровно 500 игр — плюс 265 хитов",
+        "Красивая установка: карточка с обложкой и прогрессом",
+        "Новинки: Half-Life, BioShock, Batman Arkham, AC, Tomb Raider",
+        "Рискованные AppID сверены со Steam" },
+      { "Exactly 500 games — 265 more hits",
+        "Beautiful installs: cover card with progress",
+        "New: Half-Life, BioShock, Batman Arkham, AC, Tomb Raider",
+        "Risky AppIDs verified against Steam" },
+      4 },
+    { "v5.3", "14.10.2026",
+      { "Запуск сразу в полный экран, окно тянется",
+        "Hero v2: гладкий градиент и мини-статы",
+        "Действия в ряд на широком экране, 6 колонок игр",
+        "Старая статистика переехала в карточки" },
+      { "Launch maximized, resizable window",
+        "Hero v2: smooth gradient and mini-stats",
+        "Action row on wide screens, 6 game columns",
+        "Old stats line moved into cards" },
+      4 },
+    { "v5.2", "14.10.2026",
+      { "Бейдж «установлена» прямо на обложках игр",
+        "Сортировка А-Я / по ID и фильтр «Установленные»",
+        "Статусы кликабельны, счётчик FPS в шапке",
+        "Скролл в начало при смене фильтра" },
+      { "Installed badge right on covers",
+        "A-Z / ID sorting and installed-only filter",
+        "Clickable statuses, FPS counter in header",
+        "Scroll reset on filter change" },
+      4 },
+    { "v5.1", "14.10.2026",
+      { "Каталог: бейджи «Установлена» и счётчик установок",
+        "Тени карточек, glow hero, путь Steam в сайдбаре",
+        "Открытие папки Steam и очистка кэша обложек",
+        "Счётчики в категориях, Esc очищает поиск" },
+      { "Catalog: installed badges and install counter",
+        "Card shadows, hero glow, Steam path in sidebar",
+        "Open Steam folder and clear cover cache",
+        "Per-category counters, Esc clears search" },
+      4 },
+    { "v5.0", "14.10.2026",
+      { "Чипсы категорий больше не вылезают — два аккуратных ряда",
+        "Иконки теперь чёткие (шрифт символов)",
+        "Hero без полос: гладкий градиент",
+        "Кнопка «Очистить» в журнале видна целиком" },
+      { "Category chips no longer overflow — two neat rows",
+        "Crisp icons (symbol font merged)",
+        "Banding-free hero: smooth gradient",
+        "Log «Clear» button fully visible" },
+      4 },
     { "v4.9", "13.10.2026",
       { "Каталог вырос до 235 игр — плюс 25 по запросу",
         "Новинки: MiSide, Detroit, Batman Arkham Knight, Borderlands, Dying Light",
@@ -217,10 +292,10 @@ static bool dl_quiet_h(HINTERNET hI, const std::string& url, const std::string& 
     return ok;
 }
 
+static bool g_coverDlStarted = false;
 static void ensure_covers_thread() {
-    static bool started = false;
-    if (started) return;
-    started = true;
+    if (g_coverDlStarted) return;
+    g_coverDlStarted = true;
     std::thread([] {
         std::string dir = tmp_path() + "/ost_covers";
         std::error_code ec;
@@ -262,6 +337,16 @@ static void ensure_covers_thread() {
         for (int k = 0; k < N; k++) pool.emplace_back(worker);
         for (auto& t : pool) t.join();
     }).detach();
+}
+
+static void recache_covers() {
+    for (auto& kv : g_covers) if (kv.second) kv.second->Release();
+    g_covers.clear();
+    g_coverFail.clear();
+    std::error_code ec;
+    fs::remove_all(widen(tmp_path() + "/ost_covers"), ec);
+    g_coverDlStarted = false;
+    ensure_covers_thread();
 }
 
 static ID3D11ShaderResourceView* load_texture_gdi(const wchar_t* wpath) {
@@ -417,6 +502,42 @@ static void refresh_status() {
     g_pok = g_has && pattern_ok(g_paths.pat);
 }
 
+// ── установленные игры: признак — {appid}.lua/.manifest + локальный журнал ──
+static std::set<std::string> g_installed;
+static std::string installed_record() { return tmp_path() + "/ost_installed.txt"; }
+static void mark_installed(const std::string& appid) {
+    if (appid.empty()) return;
+    g_installed.insert(appid);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, widen(installed_record()).c_str(), L"a") == 0 && f) {
+        fprintf(f, "%s\n", appid.c_str());
+        fclose(f);
+    }
+}
+static void refresh_installed() {
+    g_installed.clear();
+    if (g_has) {
+        for (int i = 0; i < kGamesCount; i++) {
+            std::string id = kGames[i].appid;
+            std::error_code ec;
+            bool has = fs::exists(widen(g_paths.lua + "\\" + id + ".lua"), ec)
+                || fs::exists(widen(g_paths.stp + "\\" + id + ".lua"), ec)
+                || fs::exists(widen(g_paths.depot + "\\" + id + ".manifest"), ec);
+            if (has) g_installed.insert(id);
+        }
+    }
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, widen(installed_record()).c_str(), L"r") == 0 && f) {
+        char line[64];
+        while (fgets(line, sizeof(line), f)) {
+            std::string s = line;
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+            if (!s.empty()) g_installed.insert(s);
+        }
+        fclose(f);
+    }
+}
+
 static void run_async(std::function<void()> fn) {
     if (g_busy.exchange(true)) return;
     std::thread([fn] {
@@ -444,6 +565,9 @@ static void do_full_install() {
             log_add(tg("загрузка pattern (github)...", "downloading pattern (github)..."));
             int n = dl_pattern(g_paths.pat);
             char b[64]; snprintf(b, sizeof(b), "%s: %d", tg("файлов", "files"), n); log_add(b);
+            log_add(tg("загрузка ipc (github)...", "downloading ipc (github)..."));
+            int ni = dl_ipc(g_paths.ipc);
+            snprintf(b, sizeof(b), "ipc: %d", ni); log_add(b);
         } else log_add(tg("pattern уже установлен", "pattern already installed"));
         set_progress_s(60);
         log_add(tg("Готово! Введите AppID и нажмите «Добавить».", "Done! Enter AppID and click Add."));
@@ -462,6 +586,8 @@ static void do_games_only() {
             log_add(tg("загрузка pattern...", "downloading pattern..."));
             int n = dl_pattern(g_paths.pat);
             char b[64]; snprintf(b, sizeof(b), "%s: %d", tg("файлов", "files"), n); log_add(b);
+            int ni = dl_ipc(g_paths.ipc);
+            snprintf(b, sizeof(b), "ipc: %d", ni); log_add(b);
         }
         log_add(tg("Готово! Введите AppID.", "Done! Enter AppID."));
         set_status_s(tg("Введите AppID", "Enter AppID"));
@@ -476,6 +602,9 @@ static void do_update_pattern() {
         log_add(tg("загрузка pattern (github)...", "downloading pattern (github)..."));
         int n = dl_pattern(g_paths.pat);
         char b[64]; snprintf(b, sizeof(b), "%s: %d", tg("файлов", "files"), n); log_add(b);
+        log_add(tg("загрузка ipc (github)...", "downloading ipc (github)..."));
+        int ni = dl_ipc(g_paths.ipc);
+        snprintf(b, sizeof(b), "ipc: %d", ni); log_add(b);
         set_progress_s(100);
         set_status_s(tg("Pattern обновлён", "Pattern updated"));
     });
@@ -507,6 +636,12 @@ static void do_remove() {
 
 static void do_add_game(const std::string& appid) {
     if (appid.empty()) return;
+    const char* nm = install_name(appid);
+    g_installName = nm ? nm : ("AppID " + appid);
+    g_installAppid = appid;
+    g_installShown = 0.0f;
+    g_installDoneT = 0.0;
+    g_showInstall = true;
     run_async([appid] {
         set_status_s("...");
         char b[128];
@@ -517,6 +652,7 @@ static void do_add_game(const std::string& appid) {
         if (install_game(appid, g_paths)) {
             log_add(tg("установлено!", "installed!"));
             set_status_s(tg("Игра установлена", "Game installed"));
+            mark_installed(appid);
         } else {
             log_add(tg("ошибка скачивания", "download error"));
             set_status_s(tg("Ошибка скачивания", "Download error"));
@@ -583,6 +719,12 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return true;
 
     switch (msg) {
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+        mmi->ptMinTrackSize.x = 980;
+        mmi->ptMinTrackSize.y = 720;
+        return 0;
+    }
     case WM_SIZE:
         if (wParam == SIZE_MINIMIZED) return 0;
         g_ResizeWidth = (UINT)LOWORD(lParam);
@@ -620,7 +762,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         return 1;
     }
 
-    ::ShowWindow(hwnd, nShow);
+    ::ShowWindow(hwnd, SW_MAXIMIZE);
     ::UpdateWindow(hwnd);
 
     IMGUI_CHECKVERSION();
@@ -694,42 +836,68 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         0x2DE0, 0x2DFF, 0xA640, 0xA69F, // cyrillic ext
         0x25A0, 0x25FF, // ▼ ▶ ● ◆
         0x2190, 0x21FF, // ↻ →
+        0x2700, 0x27BF, // ✓ ✕ ★
         0,
     };
 
     // load font with Cyrillic support (UI)
     ImFont* fontMain = nullptr;
+    ImFontConfig cfgMain;
+    cfgMain.OversampleH = 3;
+    cfgMain.OversampleV = 2;
     for (const char* fp : { "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\msyh.ttc",
                              "C:\\Windows\\Fonts\\tahoma.ttf", "C:\\Windows\\Fonts\\arial.ttf" }) {
-        fontMain = io.Fonts->AddFontFromFileTTF(fp, 19.0f, nullptr, kFontRanges);
+        fontMain = io.Fonts->AddFontFromFileTTF(fp, 19.0f, &cfgMain, kFontRanges);
         if (fontMain) break;
     }
     if (!fontMain)
         fontMain = io.Fonts->AddFontDefault();
     io.FontDefault = fontMain;
 
+    // иконки ▼▶↻× — добираем из Segoe UI Symbol (в обычном Segoe они кривые)
+    {
+        ImFontConfig cfg;
+        cfg.MergeMode = true;
+        cfg.PixelSnapH = true;
+        static const ImWchar symRanges[] = { 0x2190, 0x21FF, 0x25A0, 0x25FF, 0 };
+        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", 19.0f, &cfg, symRanges);
+    }
+
     // big title font
     ImFont* fontTitle = nullptr;
+    ImFontConfig cfgTitle;
+    cfgTitle.OversampleH = 3;
+    cfgTitle.OversampleV = 2;
     for (const char* fp : { "C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\segoeui.ttf",
                              "C:\\Windows\\Fonts\\tahoma.ttf" }) {
-        fontTitle = io.Fonts->AddFontFromFileTTF(fp, 30.0f, nullptr, kFontRanges);
+        fontTitle = io.Fonts->AddFontFromFileTTF(fp, 30.0f, &cfgTitle, kFontRanges);
         if (fontTitle) break;
     }
     if (!fontTitle) fontTitle = fontMain;
 
-    // small font for hints
+    // small font for hints (brighter + snapped = readable)
     ImFont* fontSmall = nullptr;
+    ImFontConfig cfgSmall;
+    cfgSmall.OversampleH = 3;
+    cfgSmall.OversampleV = 2;
+    cfgSmall.PixelSnapH = true;
+    cfgSmall.RasterizerMultiply = 1.35f;
     for (const char* fp : { "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\tahoma.ttf" }) {
-        fontSmall = io.Fonts->AddFontFromFileTTF(fp, 14.0f, nullptr, kFontRanges);
+        fontSmall = io.Fonts->AddFontFromFileTTF(fp, 14.0f, &cfgSmall, kFontRanges);
         if (fontSmall) break;
     }
     if (!fontSmall) fontSmall = fontMain;
 
     // monospace font for log
     ImFont* fontMono = nullptr;
+    ImFontConfig cfgMono;
+    cfgMono.OversampleH = 3;
+    cfgMono.OversampleV = 2;
+    cfgMono.PixelSnapH = true;
+    cfgMono.RasterizerMultiply = 1.25f;
     for (const char* fp : { "C:\\Windows\\Fonts\\consola.ttf", "C:\\Windows\\Fonts\\cour.ttf",
                              "C:\\Windows\\Fonts\\segoeui.ttf" }) {
-        fontMono = io.Fonts->AddFontFromFileTTF(fp, 15.0f, nullptr, kFontRanges);
+        fontMono = io.Fonts->AddFontFromFileTTF(fp, 15.0f, &cfgMono, kFontRanges);
         if (fontMono) break;
     }
     if (!fontMono) fontMono = fontMain;
@@ -738,7 +906,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     refresh_status();
-    log_add("OpenSteamTool Installer v4.9");
+    refresh_installed();
+    log_add("OpenSteamTool Installer v6.1");
     log_add(tg("Готово. Установка — во вкладке «Настройки», игры — во вкладке «Игры».",
         "Ready. Installer is in «Settings», games are in «Games»."));
     load_theme();
@@ -869,7 +1038,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::PopFont();
             // пилюля версии
             {
-                const char* ver = "v4.9";
+                const char* ver = "v6.1";
                 ImVec2 tp = ImGui::GetCursorScreenPos();
                 ImVec2 tsz = ImGui::CalcTextSize(ver);
                 ImVec2 pad(10, 3);
@@ -902,7 +1071,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.63f, 0.70f, 1.0f));
                     if (ImGui::Button(label, sz)) {
                         g_tab = idx;
-                        if (idx == 1) ensure_covers_thread();
+                        if (idx == 1) { ensure_covers_thread(); refresh_installed(); }
                     }
                     ImGui::PopStyleColor(4);
                 }
@@ -924,8 +1093,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 dl->AddLine(ImVec2(g_selX, g_indY0 + 9), ImVec2(g_selX, g_indY0 + g_indH0 - 9),
                     accentU32, 3.0f);
             }
-            // статус + прогресс + язык внизу сайдбара
-            ImGui::SetCursorPosY(midH - 102);
+            // путь Steam + статус + прогресс + язык внизу сайдбара
+            ImGui::SetCursorPosY(midH - 146);
+            ImGui::PushFont(fontSmall);
+            ImGui::TextColored(ImVec4(0.45f, 0.47f, 0.58f, 1.0f), "STEAM");
+            {
+                std::string sp = g_has ? g_paths.steam : tg("не найден", "not found");
+                std::string spt = trunc1(sp.c_str(), navW - 28);
+                ImGui::TextDisabled("%s", spt.c_str());
+            }
+            ImGui::PopFont();
             if (g_busy.load()) {
                 spinner(7.0f, 2.5f, accentU32);
                 ImGui::SameLine();
@@ -987,8 +1164,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         if (g_tab == 2) {
             ImGui::SameLine(pw - 30);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6);
-            if (ImGui::SmallButton("\xE2\x86\xBB")) refresh_status();
+            if (ImGui::SmallButton("\xE2\x86\xBB")) { refresh_status(); refresh_installed(); }
         }
+        ImGui::PushFont(fontSmall);
+        ImGui::SameLine(pw - (g_tab == 2 ? 110 : 70));
+        ImGui::TextDisabled("%.0f FPS", (double)ImGui::GetIO().Framerate);
+        ImGui::PopFont();
         ImGui::Spacing();
 
         // плавное появление контента при переключении вкладок
@@ -1034,6 +1215,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 34);
                 if (ok) ImGui::TextColored(ImVec4(0.15f, 0.90f, 0.45f, 1.0f), "%s", okT);
                 else    ImGui::TextColored(ImVec4(1.0f, 0.32f, 0.32f, 1.0f), "%s", badT);
+                ImGui::SetCursorScreenPos(p0);
+                if (ImGui::InvisibleButton("##refr", ImGui::GetContentRegionAvail())) {
+                    refresh_status();
+                    refresh_installed();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", tg("Обновить статус", "Refresh status"));
                 ImGui::EndChild();
                 ImGui::PopStyleVar();
                 if (ImGui::IsItemHovered()) {
@@ -1066,7 +1254,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::SetCursorScreenPos(ImVec2(ip.x + idBox + 8, ip.y));
             ImGui::SetNextItemWidth(pw - addW - 10 - idBox - 8);
             ImGui::InputTextWithHint("##appid", tg("Например: 271590", "e.g. 271590"),
-                g_appidBuf, sizeof(g_appidBuf));
+                g_appidBuf, sizeof(g_appidBuf), ImGuiInputTextFlags_EscapeClearsAll);
         }
         ImGui::SameLine();
         bool addClicked = accent_btn(tg("+  Добавить игру", "+  Add game"), ImVec2(addW, 0),
@@ -1081,6 +1269,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             } else if (g_appidBuf[0]) {
                 log_add(tg("не AppID — только цифры", "not AppID — digits only"));
             }
+        }
+
+        ImGui::Spacing();
+
+        // ── быстрые действия ──
+        {
+            float bw = (pw - 10) / 2.0f;
+            if (ImGui::Button(tg("Открыть папку Steam", "Open Steam folder"), ImVec2(bw, 0))) {
+                if (g_has) ShellExecuteW(nullptr, L"open", widen(g_paths.steam).c_str(),
+                    nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            ImGui::SameLine(0, 10);
+            if (ImGui::Button(tg("Очистить кэш обложек", "Clear cover cache"), ImVec2(bw, 0)))
+                recache_covers();
         }
 
         ImGui::Spacing();
@@ -1128,20 +1330,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 if (clicked) { refresh_status(); fn(); }
             };
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
-            act("##aAll", "\xE2\x96\xBC", tg("Установить всё", "Install all"),
-                tg("DLL + паттерн + подготовка", "DLLs + pattern + setup"),
-                ImVec4(0.12f, 0.42f, 0.95f, 1.0f), do_full_install);
-            ImGui::SameLine(0, agap);
-            act("##aGame", "\xE2\x96\xB6", tg("Только игру", "Game only"),
-                tg("Подготовка под AppID", "Prepare for AppID"),
-                ImVec4(0.06f, 0.45f, 0.48f, 1.0f), do_games_only);
-            act("##aPat", "\xE2\x86\xBB", tg("Обновить паттерн", "Update pattern"),
-                tg("Свежие файлы с GitHub", "Fresh files from GitHub"),
-                ImVec4(0.35f, 0.22f, 0.62f, 1.0f), do_update_pattern);
-            ImGui::SameLine(0, agap);
-            act("##aDel", "\xC3\x97", tg("Удалить", "Remove"),
-                tg("Убрать DLL и файлы", "Remove DLLs and files"),
-                ImVec4(0.55f, 0.16f, 0.16f, 1.0f), do_remove);
+            struct ActDef { const char* id; const char* glyph; const char* ruT; const char* enT; const char* ruD; const char* enD; ImVec4 col; void (*fn)(); };
+            static const ActDef acts[] = {
+                { "##aAll", "\xE2\x96\xBC", "Установить всё", "Install all", "DLL + паттерн + подготовка", "DLLs + pattern + setup", ImVec4(0.12f, 0.42f, 0.95f, 1.0f), do_full_install },
+                { "##aGame", "\xE2\x96\xB6", "Только игру", "Game only", "Подготовка под AppID", "Prepare for AppID", ImVec4(0.06f, 0.45f, 0.48f, 1.0f), do_games_only },
+                { "##aPat", "\xE2\x86\xBB", "Обновить паттерн", "Update pattern", "Свежие файлы с GitHub", "Fresh files from GitHub", ImVec4(0.35f, 0.22f, 0.62f, 1.0f), do_update_pattern },
+                { "##aDel", "\xC3\x97", "Удалить", "Remove", "Убрать DLL и файлы", "Remove DLLs and files", ImVec4(0.55f, 0.16f, 0.16f, 1.0f), do_remove },
+            };
+            int acols = pw > 1200 ? 4 : 2;
+            acw = (pw - agap * (float)(acols - 1)) / (float)acols;
+            for (int ai = 0; ai < 4; ai++) {
+                if (ai % acols) ImGui::SameLine(0, agap);
+                const ActDef& a = acts[ai];
+                act(a.id, a.glyph, tg(a.ruT, a.enT), tg(a.ruD, a.enD), a.col, a.fn);
+            }
             ImGui::PopStyleVar();
         }
 
@@ -1191,7 +1393,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         ImGui::PushFont(fontSmall);
         ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), tg("ЖУРНАЛ", "LOG"));
         ImGui::PopFont();
-        ImGui::SameLine(pw - 190);
+        ImGui::SameLine(pw - 235);
         ImGui::PushFont(fontSmall);
         ImGui::Checkbox(tg("Автопрокрутка", "Autoscroll"), &g_autoScroll);
         ImGui::PopFont();
@@ -1246,45 +1448,85 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::SetNextItemWidth(pw);
             ImGui::InputTextWithHint("##gsearch",
                 tg("Поиск игры или AppID...", "Search game or AppID..."),
-                g_searchBuf, sizeof(g_searchBuf));
+                g_searchBuf, sizeof(g_searchBuf), ImGuiInputTextFlags_EscapeClearsAll);
 
-            // категории-чипсы (два ряда, без скроллбара)
+            // категории-чипсы со счётчиками (два ряда, без скроллбара, точный перенос)
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 2));
             ImGui::BeginChild("##cats", ImVec2(0, 68), false, ImGuiWindowFlags_NoScrollbar);
-            for (int ci = 0; ci < kCatsCount; ci++) {
-                const char* lbl = tg(kCats[ci].ru, kCats[ci].en);
-                if (ci) {
-                    float wneed = ImGui::CalcTextSize(lbl).x + 26.0f;
-                    if (ImGui::GetCursorPosX() + wneed < pw - 8) ImGui::SameLine();
+            {
+                static char chipLbl[16][64];
+                for (int ci = 0; ci < kCatsCount; ci++) {
+                    int cnt = 0;
+                    for (int gi = 0; gi < kGamesCount; gi++)
+                        if (ci == 0 || !strcmp(kGames[gi].cat, kCats[ci].key)) cnt++;
+                    snprintf(chipLbl[ci], sizeof(chipLbl[ci]), "%s (%d)",
+                        tg(kCats[ci].ru, kCats[ci].en), cnt);
                 }
-                if (ci == g_catSel) {
-                    accent_btn(lbl, ImVec2(0, 28), g_accent);
-                } else if (ImGui::Button(lbl, ImVec2(0, 28))) {
-                    g_catSel = ci;
+                float availW = ImGui::GetContentRegionAvail().x;
+                float cgap = 10.0f;
+                float cpadX = ImGui::GetStyle().FramePadding.x * 2.0f;
+                float chipW[16];
+                for (int ci = 0; ci < kCatsCount; ci++)
+                    chipW[ci] = ImGui::CalcTextSize(chipLbl[ci]).x + cpadX;
+                float x = 0.0f;
+                for (int ci = 0; ci < kCatsCount; ci++) {
+                    if (ci > 0) {
+                        if (x + cgap + chipW[ci] > availW + 1.0f) x = 0.0f;
+                        else { ImGui::SameLine(0, cgap); x += cgap; }
+                    }
+                    if (ci == g_catSel) {
+                        accent_btn(chipLbl[ci], ImVec2(0, 28), g_accent);
+                    } else if (ImGui::Button(chipLbl[ci], ImVec2(0, 28))) {
+                        g_catSel = ci;
+                    }
+                    x += chipW[ci];
                 }
             }
             ImGui::EndChild();
             ImGui::PopStyleVar();
 
-            // фильтр
+            // фильтр + сортировка
             std::vector<const GameEntry*> list;
             for (int i = 0; i < kGamesCount; i++) {
                 const GameEntry* ge = &kGames[i];
                 if (g_catSel != 0 && strcmp(ge->cat, kCats[g_catSel].key) != 0) continue;
+                if (g_onlyInst && g_installed.count(ge->appid) == 0) continue;
                 if (g_searchBuf[0]) {
                     if (!contains_ci(ge->name, g_searchBuf) && !strstr(ge->appid, g_searchBuf))
                         continue;
                 }
                 list.push_back(ge);
             }
+            if (g_sort == 0)
+                std::sort(list.begin(), list.end(),
+                    [](const GameEntry* a, const GameEntry* b) { return _stricmp(a->name, b->name) < 0; });
+            else
+                std::sort(list.begin(), list.end(),
+                    [](const GameEntry* a, const GameEntry* b) { return atoi(a->appid) < atoi(b->appid); });
+            // сброс прокрутки при смене фильтра
+            {
+                static std::string lastKey;
+                char key[128];
+                snprintf(key, sizeof(key), "%s|%d|%d|%d", g_searchBuf, g_catSel, g_sort, (int)g_onlyInst);
+                if (lastKey != key) {
+                    lastKey = key;
+                    g_scrollTgt["##grid"] = 0.0f;
+                    ImGui::SetScrollY(0.0f);
+                }
+            }
 
             ImGui::PushFont(fontSmall);
             char foundBuf[128];
-            snprintf(foundBuf, sizeof(foundBuf), tg("Найдено игр: %d  •  обложки: %d/%d",
-                "Games found: %d  •  covers: %d/%d"),
-                (int)list.size(), (int)g_covers.size(), kGamesCount);
+            snprintf(foundBuf, sizeof(foundBuf), tg("Найдено игр: %d  •  установлено: %d  •  обложки: %d/%d",
+                "Games found: %d  •  installed: %d  •  covers: %d/%d"),
+                (int)list.size(), (int)g_installed.size(), (int)g_covers.size(), kGamesCount);
             ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), "%s", foundBuf);
             ImGui::PopFont();
+            ImGui::SameLine(pw - 250);
+            if (ImGui::SmallButton(g_sort == 0 ? tg("Сорт: А-Я", "Sort: A-Z") : tg("Сорт: ID", "Sort: ID")))
+                g_sort ^= 1;
+            ImGui::SameLine();
+            ImGui::Checkbox(tg("Установленные", "Installed"), &g_onlyInst);
 
             float gridH = ImGui::GetContentRegionAvail().y - 40;
             if (gridH < 100) gridH = 100;
@@ -1293,7 +1535,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
             smooth_child("##grid");
 
-            int cols = pw > 560 ? 4 : (pw > 380 ? 3 : 2);
+            int cols = pw > 1400 ? 6 : pw > 1050 ? 5 : pw > 560 ? 4 : (pw > 380 ? 3 : 2);
             float gap = 10.0f;
             float cardW = (ImGui::GetContentRegionAvail().x - gap * (float)(cols - 1)) / (float)cols;
             float imgW = cardW - 16.0f;
@@ -1301,10 +1543,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
             ImGui::PushFont(fontSmall);
+            if (list.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("%s", tg("Ничего не найдено — измените поиск или категорию",
+                    "Nothing found — change search or category"));
+            }
             for (size_t i = 0; i < list.size(); i++) {
                 const GameEntry* ge = list[i];
                 if (i % (size_t)cols) ImGui::SameLine(0, gap);
                 ImGui::PushID((int)i);
+                {
+                    ImVec2 sp = ImGui::GetCursorScreenPos();
+                    ImGui::GetWindowDrawList()->AddRectFilled(
+                        ImVec2(sp.x, sp.y + 5), ImVec2(sp.x + cardW + 5, sp.y + imgH + 109),
+                        IM_COL32(0, 0, 0, 90), 10.0f);
+                }
                 ImGui::BeginChild("##card", ImVec2(cardW, imgH + 104), true);
                 auto it = g_covers.find(ge->appid);
                 if (it != g_covers.end() && it->second) {
@@ -1333,6 +1586,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         IM_COL32(5, 5, 10, 170), 5.0f);
                     ImGui::SetCursorScreenPos(ImVec2(pp.x + 6, pp.y + 3));
                     ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", cname);
+                    // зелёный бейдж «установлена» справа сверху
+                    if (g_installed.count(ge->appid)) {
+                        const char* mk = "✓";
+                        ImVec2 mz = ImGui::CalcTextSize(mk);
+                        ImVec2 mp(imx.x - mz.x - 18, imn.y + 6);
+                        cdl->AddRectFilled(mp, ImVec2(mp.x + mz.x + 12, mp.y + mz.y + 6),
+                            IM_COL32(10, 140, 70, 200), 5.0f);
+                        ImGui::SetCursorScreenPos(ImVec2(mp.x + 6, mp.y + 3));
+                        ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", mk);
+                    }
                     ImGui::SetCursorPos(saved);
                 } else {
                     // скелетон с пробегающим бликом
@@ -1354,9 +1617,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", nm.c_str());
                 ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), "AppID %s", ge->appid);
                 ImGui::BeginDisabled(g_busy.load());
-                if (accent_btn(tg("Установить", "Install"), ImVec2(imgW, 28),
-                        ImVec4(0.05f, 0.55f, 0.30f, 1.0f))) {
+                bool inst = g_installed.count(ge->appid) > 0;
+                const char* blbl = inst ? tg("✓ Установлена", "✓ Installed")
+                                        : tg("Установить", "Install");
+                ImVec4 bcol = inst ? ImVec4(0.10f, 0.42f, 0.24f, 1.0f)
+                                   : ImVec4(0.05f, 0.55f, 0.30f, 1.0f);
+                if (accent_btn(blbl, ImVec2(imgW, 28), bcol)) {
                     refresh_status();
+                    refresh_installed();
                     do_add_game(std::string(ge->appid));
                 }
                 ImGui::EndDisabled();
@@ -1380,35 +1648,45 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             // ══ вкладка ГЛАВНАЯ: новости обновлений ══
             // ── hero-баннер ──
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
+            {
+                ImVec2 sp = ImGui::GetCursorScreenPos();
+                float sw = ImGui::GetContentRegionAvail().x;
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(sp.x, sp.y + 5), ImVec2(sp.x + sw + 5, sp.y + 133),
+                    IM_COL32(0, 0, 0, 90), 12.0f);
+            }
             ImGui::BeginChild("##hero", ImVec2(0, 128), true);
             {
                 ImVec2 hp = ImGui::GetCursorScreenPos();
                 float hw = ImGui::GetContentRegionAvail().x;
-                int segs = 28;
-                for (int i = 0; i < segs; i++) {
-                    float k0 = (float)i / segs, k1 = (float)(i + 1) / segs;
-                    int al = (int)((1.0f - k0) * 70);
-                    ImU32 hc = IM_COL32((int)(g_accent.x * 255), (int)(g_accent.y * 255),
-                        (int)(g_accent.z * 255), al);
-                    ImDrawFlags rf = 0;
-                    if (i == 0) rf = ImDrawFlags_RoundCornersLeft;
-                    else if (i == segs - 1) rf = ImDrawFlags_RoundCornersRight;
-                    ImGui::GetWindowDrawList()->AddRectFilled(
-                        ImVec2(hp.x + hw * k0, hp.y), ImVec2(hp.x + hw * k1, hp.y + 108), hc, 10.0f, rf);
-                }
-                // пробегающий блик по баннеру
+                // вертикальный градиент: акцент сверху → прозрачность снизу (без полос)
                 {
-                    ImDrawList* hdl = ImGui::GetWindowDrawList();
-                    ImVec2 h0(hp.x, hp.y), h1(hp.x + hw, hp.y + 108);
-                    hdl->PushClipRect(h0, h1, true);
-                    float hsx = hp.x + hw * (fmodf((float)ImGui::GetTime() * 0.22f, 1.4f) - 0.2f);
-                    hdl->AddLine(ImVec2(hsx, h0.y), ImVec2(hsx, h1.y),
-                        IM_COL32(255, 255, 255, 34), 30.0f);
-                    hdl->PopClipRect();
+                    int vsegs = 27;
+                    for (int i = 0; i < vsegs; i++) {
+                        float k0 = (float)i / vsegs, k1 = (float)(i + 1) / vsegs;
+                        int al = (int)((1.0f - k0) * 46);
+                        ImU32 hc = IM_COL32((int)(g_accent.x * 255), (int)(g_accent.y * 255),
+                            (int)(g_accent.z * 255), al);
+                        ImDrawFlags rf = 0;
+                        if (i == 0) rf = ImDrawFlags_RoundCornersTop;
+                        else if (i == vsegs - 1) rf = ImDrawFlags_RoundCornersBottom;
+                        ImGui::GetWindowDrawList()->AddRectFilled(
+                            ImVec2(hp.x, hp.y + 108 * k0), ImVec2(hp.x + hw, hp.y + 108 * k1), hc, 10.0f, rf);
+                    }
+                }
+                // мягкое свечение справа
+                {
+                    ImDrawList* odl = ImGui::GetWindowDrawList();
+                    ImVec2 oc(hp.x + hw * 0.84f, hp.y + 54);
+                    int or_ = (int)(g_accent.x * 255), og = (int)(g_accent.y * 255), ob = (int)(g_accent.z * 255);
+                    for (int gi = 0; gi < 6; gi++)
+                        odl->AddCircleFilled(oc, 72.0f - (float)gi * 9.0f,
+                            IM_COL32(or_, og, ob, 6 + gi * 2));
                 }
                 ImGui::PushFont(fontTitle);
                 ImGui::TextColored(ImVec4(1, 1, 1, 1), "OpenSteamTool");
-                ImGui::PopFont();                ImGui::PushFont(fontSmall);
+                ImGui::PopFont();
+                ImGui::PushFont(fontSmall);
                 ImGui::TextColored(ImVec4(0.65f, 0.67f, 0.75f, 1.0f),
                     tg("Всё для Steam-игр в одном окне", "Everything for Steam games in one window"));
                 char stats[128];
@@ -1416,6 +1694,41 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     "%d games  •  %d categories  •  RU / EN"), kGamesCount, kCatsCount - 1);
                 ImGui::TextColored(g_accent, "%s", stats);
                 ImGui::PopFont();
+                ImVec2 afterLeft = ImGui::GetCursorPos();
+                // мини-статы справа (только если широко)
+                if (hw > 560) {
+                    struct StatDef { int val; const char* ru; const char* en; };
+                    StatDef sds[3] = {
+                        { kGamesCount, "игр", "games" },
+                        { (int)g_installed.size(), "установлено", "installed" },
+                        { kCatsCount - 1, "категорий", "categories" },
+                    };
+                    float bw2 = 100.0f, bh2 = 80.0f, sgap = 10.0f;
+                    float sx = hp.x + hw - (bw2 * 3 + sgap * 2);
+                    float sy = hp.y + 14.0f;
+                    ImDrawList* sdl = ImGui::GetWindowDrawList();
+                    for (int si = 0; si < 3; si++) {
+                        ImVec2 b0(sx + si * (bw2 + sgap), sy);
+                        ImVec2 b1(b0.x + bw2, sy + bh2);
+                        sdl->AddRectFilled(b0, b1, IM_COL32(255, 255, 255, 10), 8.0f);
+                        sdl->AddRect(b0, b1, ImGui::ColorConvertFloat4ToU32(
+                            ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.35f)), 8.0f, 0, 1.0f);
+                        char nb[16];
+                        snprintf(nb, sizeof(nb), "%d", sds[si].val);
+                        ImGui::PushFont(fontTitle);
+                        ImVec2 nz = ImGui::CalcTextSize(nb);
+                        ImGui::SetCursorScreenPos(ImVec2(b0.x + (bw2 - nz.x) * 0.5f, b0.y + 8));
+                        ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", nb);
+                        ImGui::PopFont();
+                        const char* sl = tg(sds[si].ru, sds[si].en);
+                        ImGui::PushFont(fontSmall);
+                        ImVec2 lz = ImGui::CalcTextSize(sl);
+                        ImGui::SetCursorScreenPos(ImVec2(b0.x + (bw2 - lz.x) * 0.5f, b1.y - lz.y - 8));
+                        ImGui::TextColored(ImVec4(0.60f, 0.62f, 0.72f, 1.0f), "%s", sl);
+                        ImGui::PopFont();
+                    }
+                    ImGui::SetCursorPos(afterLeft);
+                }
             }
             ImGui::EndChild();
             ImGui::PopStyleVar();
@@ -1438,6 +1751,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 snprintf(nid, sizeof(nid), "##news%d", ni);
                 // каскадное появление: каждая следующая выезжает дальше
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (1.0f - ease) * (10.0f + ni * 8.0f));
+                {
+                    ImVec2 sp = ImGui::GetCursorScreenPos();
+                    float sw = ImGui::GetContentRegionAvail().x;
+                    ImGui::GetWindowDrawList()->AddRectFilled(
+                        ImVec2(sp.x, sp.y + 5), ImVec2(sp.x + sw + 5, sp.y + cardH + 5),
+                        IM_COL32(0, 0, 0, 90), 10.0f);
+                }
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
                 ImGui::BeginChild(nid, ImVec2(0, cardH), true);
                 // пилюля версии (у свежей — пульсирует)
@@ -1491,7 +1811,104 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
         ImGui::PopStyleVar(); // startup fade
 
-        ImGui::End();
+        ImGui::End(); // ##main (оверлей установки — отдельным окном поверх всего)
+
+        // ── красивый экран установки ──
+        if (g_showInstall && !g_busy.load()) {
+            if (g_installDoneT <= 0) g_installDoneT = ImGui::GetTime();
+            else if (ImGui::GetTime() - g_installDoneT > 2.5) g_showInstall = false;
+        }
+        if (g_showInstall) {
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+            ImGui::Begin("##install", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoBackground);
+            ImDrawList* odl = ImGui::GetWindowDrawList();
+            ImVec2 ws = ImGui::GetIO().DisplaySize;
+            ImVec2 o0(0, 0);
+            odl->AddRectFilled(o0, ImVec2(o0.x + ws.x, o0.y + ws.y), IM_COL32(2, 2, 4, 200));
+            ImGui::SetCursorScreenPos(o0);
+            ImGui::InvisibleButton("##ovl", ws);
+            float cw2 = 480.0f, ch2 = 450.0f;
+            ImVec2 c0(o0.x + (ws.x - cw2) * 0.5f, o0.y + (ws.y - ch2) * 0.5f);
+            ImVec2 c1(c0.x + cw2, c0.y + ch2);
+            odl->AddRectFilled(c0, c1, IM_COL32(12, 12, 20, 255), 14.0f);
+            odl->AddRect(c0, c1, accentU32, 14.0f, 0, 2.0f);
+            ImGui::SetCursorScreenPos(ImVec2(c1.x - 38, c0.y + 8));
+            if (ImGui::SmallButton("×")) g_showInstall = false;
+            float iw = 440.0f, ih = iw * 353.0f / 616.0f;
+            ImVec2 ip(c0.x + 20, c0.y + 16);
+            auto cit = g_covers.find(g_installAppid);
+            if (cit != g_covers.end() && cit->second) {
+                ImGui::SetCursorScreenPos(ip);
+                ImGui::Image((ImTextureID)cit->second, ImVec2(iw, ih));
+            } else {
+                odl->AddRectFilled(ip, ImVec2(ip.x + iw, ip.y + ih), IM_COL32(10, 10, 18, 255), 8.0f);
+            }
+            ImGui::PushFont(fontTitle);
+            std::string tn = trunc1(g_installName.c_str(), iw);
+            ImVec2 tz = ImGui::CalcTextSize(tn.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(ip.x + (iw - tz.x) * 0.5f, ip.y + ih + 10));
+            ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", tn.c_str());
+            ImGui::PopFont();
+            ImGui::PushFont(fontSmall);
+            {
+                char ab[64];
+                snprintf(ab, sizeof(ab), "AppID %s", g_installAppid.c_str());
+                ImVec2 az = ImGui::CalcTextSize(ab);
+                ImGui::SetCursorScreenPos(ImVec2(ip.x + (iw - az.x) * 0.5f, ip.y + ih + 48));
+                ImGui::TextColored(ImVec4(0.55f, 0.57f, 0.65f, 1.0f), "%s", ab);
+            }
+            ImGui::PopFont();
+            {
+                float target = (float)g_progressAtomic.load();
+                float k = 1.0f - expf(-ImGui::GetIO().DeltaTime * 6.0f);
+                g_installShown += (target - g_installShown) * k;
+                if (fabsf(g_installShown - target) < 0.5f) g_installShown = target;
+            }
+            char pct[16];
+            snprintf(pct, sizeof(pct), "%d%%", (int)g_installShown);
+            ImGui::PushFont(fontTitle);
+            ImVec2 pz = ImGui::CalcTextSize(pct);
+            ImGui::SetCursorScreenPos(ImVec2(ip.x + (iw - pz.x) * 0.5f, ip.y + ih + 72));
+            ImGui::TextColored(g_accent, "%s", pct);
+            ImGui::PopFont();
+            {
+                ImVec2 bp(ip.x, ip.y + ih + 122);
+                odl->AddRectFilled(bp, ImVec2(bp.x + iw, bp.y + 14), IM_COL32(25, 25, 38, 255), 7.0f);
+                float fx = bp.x + iw * (g_installShown / 100.0f);
+                if (fx > bp.x) {
+                    odl->PushClipRect(bp, ImVec2(bp.x + iw, bp.y + 14), true);
+                    odl->AddRectFilled(bp, ImVec2(fx, bp.y + 14), accentU32, 7.0f);
+                    if (g_busy.load()) {
+                        float ph = fmodf((float)ImGui::GetTime() * 0.9f, 1.2f) - 0.1f;
+                        float sx = bp.x + iw * ph;
+                        odl->AddLine(ImVec2(sx, bp.y), ImVec2(sx, bp.y + 14), IM_COL32(255, 255, 255, 110), 3.0f);
+                    }
+                    odl->PopClipRect();
+                }
+            }
+            ImGui::PushFont(fontSmall);
+            if (g_busy.load()) {
+                int dots = 1 + ((int)(ImGui::GetTime() * 2.5) % 3);
+                char wbuf[64];
+                snprintf(wbuf, sizeof(wbuf), "%s%.*s", tg("Загрузка и установка", "Downloading & installing"), dots, "...");
+                ImVec2 wz = ImGui::CalcTextSize(wbuf);
+                ImGui::SetCursorScreenPos(ImVec2(ip.x + (iw - wz.x) * 0.5f, ip.y + ih + 144));
+                ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.2f, 1.0f), "%s", wbuf);
+            } else {
+                std::string sst;
+                { std::lock_guard<std::mutex> lk(g_statusMutex); sst = g_status; }
+                ImVec2 sz2 = ImGui::CalcTextSize(sst.c_str());
+                ImGui::SetCursorScreenPos(ImVec2(ip.x + (iw - sz2.x) * 0.5f, ip.y + ih + 144));
+                ImGui::TextColored(ImVec4(0.15f, 0.90f, 0.45f, 1.0f), "%s", sst.c_str());
+            }
+            ImGui::PopFont();
+            ImGui::End(); // ##install
+        }
 
         ImGui::Render();
         const float clear_color[4] = { 0.016f, 0.016f, 0.022f, 1.00f };

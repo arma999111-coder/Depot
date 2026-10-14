@@ -89,7 +89,8 @@ bool pattern_ok(const std::string& p) {
     int n = 0;
     for (auto& e : fs::recursive_directory_iterator(widen(p), ec)) {
         if (ec) return false;
-        if (e.is_regular_file() && ++n >= 5) return true;
+        // честные сигнатуры — только .toml (.proto из ветки protobuf не в счёт)
+        if (e.is_regular_file() && e.path().extension() == ".toml" && ++n >= 5) return true;
     }
     return false;
 }
@@ -118,6 +119,49 @@ int install_dlls(const std::string& steam) {
 }
 
 // ── download ──
+// тихий запуск без консольного окна (вместо system/_popen)
+static DWORD run_hidden(const std::string& cmd, std::string* cap = nullptr) {
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE hR = nullptr, hW = nullptr;
+    if (cap && !CreatePipe(&hR, &hW, &sa, 0)) return 1;
+    if (hW) SetHandleInformation(hR, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW | (cap ? STARTF_USESTDHANDLES : 0);
+    si.wShowWindow = SW_HIDE;
+    if (cap) { si.hStdOutput = hW; si.hStdError = hW; si.hStdInput = GetStdHandle(STD_INPUT_HANDLE); }
+    PROCESS_INFORMATION pi{};
+    std::vector<char> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    DWORD code = 1;
+    if (CreateProcessA(nullptr, buf.data(), nullptr, nullptr, cap ? TRUE : FALSE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        if (hW) { CloseHandle(hW); hW = nullptr; }
+        if (cap) {
+            char tmp[256];
+            DWORD rd = 0;
+            std::string all;
+            for (;;) {
+                BOOL ok = ReadFile(hR, tmp, sizeof(tmp) - 1, &rd, nullptr);
+                if (!ok || rd == 0) break;
+                tmp[rd] = 0;
+                all += tmp;
+                if (all.size() > 4096) break;
+            }
+            auto p = all.find('\n');
+            if (p != std::string::npos) all.resize(p);
+            *cap = all;
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    if (hW) CloseHandle(hW);
+    if (hR) CloseHandle(hR);
+    return code;
+}
+
 bool dl(const std::string& url, const std::string& out) {
     std::string ps =
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
@@ -125,18 +169,19 @@ bool dl(const std::string& url, const std::string& out) {
         "Invoke-WebRequest -Uri '" + url + "' -OutFile '" + out + "' -Headers $h -UseBasicParsing -TimeoutSec 120; "
         "Write-Output ('SIZE:' + (Get-Item '" + out + "').Length) } "
         "catch { Write-Output 'ERR'; exit 1 }\"";
-    FILE* pipe = _popen(ps.c_str(), "r");
-    if (!pipe) return false;
-    char r[128] = {0}; fgets(r, sizeof(r), pipe); _pclose(pipe);
-    r[strcspn(r, "\n")] = 0;
-    if (strstr(r, "ERR")) { DeleteFileA(out.c_str()); return false; }
+    FILE* pipe = nullptr;
+    (void)pipe;
+    std::string r;
+    run_hidden(ps, &r);
+    if (r.find("ERR") != std::string::npos) { DeleteFileA(out.c_str()); return false; }
     return true;
 }
 
 int dl_pattern(const std::string& pat) {
     std::string zip = pat + "\\__r.zip", ext = pat + "\\__e";
     fs::create_directories(widen(pat));
-    if (!dl("https://codeload.github.com/OpenSteam001/steam-monitor/zip/refs/heads/protobuf", zip)) return 0;
+    // ВАЖНО: сигнатуры .toml лежат в ветке pattern (в protobuf — только .proto-исходники)
+    if (!dl("https://codeload.github.com/OpenSteam001/steam-monitor/zip/refs/heads/pattern", zip)) return 0;
     std::string ps =
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
         "Expand-Archive -LiteralPath '" + zip + "' -DestinationPath '" + ext + "' -Force; "
@@ -145,11 +190,42 @@ int dl_pattern(const std::string& pat) {
         "if(Test-Path $s){ New-Item -ItemType Directory -Path $t -Force|Out-Null; "
         "Copy-Item (Join-Path $s '*') $t -Recurse -Force } }; "
         "Remove-Item '" + zip + "' -Force -EA 0; Remove-Item '" + ext + "' -Recurse -Force -EA 0\"";
-    if (system(ps.c_str()) != 0) return 0;
-    int n = 0; std::error_code ec;
+    if (run_hidden(ps) != 0) return 0;
+    // чистим мусор от старой ветки protobuf (.proto вместо сигнатур)
+    std::error_code ec;
+    for (auto& e : fs::recursive_directory_iterator(widen(pat), ec)) {
+        if (ec) break;
+        if (e.is_regular_file() && e.path().extension() == ".proto")
+            fs::remove(e.path(), ec);
+    }
+    int n = 0;
     for (auto& sub : { pat + "\\steamui", pat + "\\steamclient" })
-        for (auto& e : fs::recursive_directory_iterator(widen(sub), ec))
-            if (!ec && e.is_regular_file()) n++;
+        for (auto& e : fs::recursive_directory_iterator(widen(sub), ec)) {
+            if (ec) break;
+            if (e.is_regular_file() && e.path().extension() == ".toml") n++;
+        }
+    return n;
+}
+
+// IPC-спеки лежат в отдельной ветке ipc (раньше не качались вообще)
+int dl_ipc(const std::string& ipcDir) {
+    std::string zip = ipcDir + "\\__r.zip", ext = ipcDir + "\\__e";
+    fs::create_directories(widen(ipcDir));
+    if (!dl("https://codeload.github.com/OpenSteam001/steam-monitor/zip/refs/heads/ipc", zip)) return 0;
+    std::string ps =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
+        "Expand-Archive -LiteralPath '" + zip + "' -DestinationPath '" + ext + "' -Force; "
+        "$r=(Get-ChildItem -LiteralPath '" + ext + "')[0].FullName; "
+        "$s=Join-Path $r 'steamclient'; $t=Join-Path '" + ipcDir + "' 'steamclient'; "
+        "if(Test-Path $s){ New-Item -ItemType Directory -Path $t -Force|Out-Null; "
+        "Copy-Item (Join-Path $s '*') $t -Recurse -Force }; "
+        "Remove-Item '" + zip + "' -Force -EA 0; Remove-Item '" + ext + "' -Recurse -Force -EA 0\"";
+    if (run_hidden(ps) != 0) return 0;
+    int n = 0; std::error_code ec;
+    for (auto& e : fs::recursive_directory_iterator(widen(ipcDir), ec)) {
+        if (ec) break;
+        if (e.is_regular_file() && e.path().extension() == ".toml") n++;
+    }
     return n;
 }
 
@@ -176,7 +252,7 @@ bool install_game(const std::string& appid, const Paths& p) {
         p.lua.c_str(), p.stp.c_str(),
         dir.c_str(), p.depot.c_str());
     fclose(f);
-    system(("powershell -NoProfile -ExecutionPolicy Bypass -File \"" + sc + "\" 2>nul").c_str());
+    run_hidden("powershell -NoProfile -ExecutionPolicy Bypass -File \"" + sc + "\"");
     int nl = 0, nm = 0;
     for (auto& e : fs::directory_iterator(widen(dir), ec)) {
         if (ec) break;

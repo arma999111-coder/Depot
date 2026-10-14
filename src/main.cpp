@@ -23,6 +23,8 @@ static void ensure_base(Paths& p, bool with_dll) {
         info(tr("загрузка (github)...", "downloading (github)..."));
         int n = dl_pattern(p.pat);
         ok("%s: %d", tr("файлов", "files"), n);
+        int ni = dl_ipc(p.ipc);
+        ok("ipc: %d", ni);
     }
     bar("pattern", 50);
     bx_bot();
@@ -118,6 +120,8 @@ static void update_pattern() {
     info(tr("загрузка (github)...", "downloading (github)..."));
     int n = dl_pattern(p.pat);
     ok("%s: %d", tr("файлов", "files"), n);
+    int ni = dl_ipc(p.ipc);
+    ok("ipc: %d", ni);
     bar("pattern", 100);
     bx_bot();
 }

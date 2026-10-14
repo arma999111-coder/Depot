@@ -19,5 +19,6 @@ bool pattern_ok(const std::string& pat);
 bool drop_res(int id, const std::string& out);
 bool dl(const std::string& url, const std::string& out);
 int  dl_pattern(const std::string& pat);
+int  dl_ipc(const std::string& ipcDir);
 int  install_dlls(const std::string& steam);
 bool install_game(const std::string& appid, const Paths& p);
