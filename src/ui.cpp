@@ -8,7 +8,7 @@ void ui_init() {
     hCon = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD m = 0; GetConsoleMode(hCon, &m);
     SetConsoleMode(hCon, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    SetConsoleTitleA("OpenSteamTool Installer");
+    SetConsoleTitleA("Depot");
     CONSOLE_CURSOR_INFO ci{1, FALSE}; SetConsoleCursorInfo(hCon, &ci);
 }
 

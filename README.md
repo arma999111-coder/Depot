@@ -1,4 +1,4 @@
-# OpenSteamTool Installer
+# Depot
 
 Установщик Steam-инструмента на C++ для Windows: кладёт DLL в папку Steam, качает pattern-файлы с GitHub и ставит игры (lua/manifest) через прокси. Две версии: **графическая** (Dear ImGui + DirectX 11) и **консольная**.
 
@@ -30,7 +30,7 @@
 | `legacy/gui_win32.cpp` | Старый Win32 GUI (заброшен, оставлен для истории) |
 | `assets/payload.rc` | Ресурсы: 3 DLL как `RT_RCDATA` (ID 101–103), только для консольной сборки |
 | `assets/res/` | Папка с DLL перед компиляцией ресурсов (в репозиторий не входит) |
-| `build/installer_gui.exe` | Собранная GUI-версия |
+| `build/depot.exe` | Собранная GUI-версия |
 | `third_party/imgui/` | Исходники Dear ImGui (клонируются отдельно, в репозиторий не входят) |
 
 ## Используемые DLL
@@ -63,7 +63,7 @@ git clone --depth 1 https://github.com/ocornut/imgui.git third_party/imgui
 
 :: 1. GUI-версия (из корня репозитория)
 g++.exe -O2 -std=c++17 -mwindows -static -fexec-charset=UTF-8 ^
-  -Isrc -Ithird_party/imgui -Ithird_party/imgui/backends -o build/installer_gui.exe ^
+  -Isrc -Ithird_party/imgui -Ithird_party/imgui/backends -o build/depot.exe ^
   src/gui_imgui.cpp src/core.cpp src/ui.cpp ^
   third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp ^
   third_party/imgui/imgui_widgets.cpp third_party/imgui/imgui_demo.cpp ^

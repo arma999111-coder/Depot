@@ -85,6 +85,16 @@ struct NewsItem {
 };
 
 static const NewsItem kNews[] = {
+    { "v6.2", "14.10.2026",
+      { "Переименование в Depot — новое имя проекта",
+        "Новое имя окна, сайдбара и hero-баннера",
+        "Старые новости и история версий сохранены",
+        "Дальше — только под именем Depot" },
+      { "Renamed to Depot — the project's new name",
+        "New window, sidebar and hero titles",
+        "Old news and version history kept",
+        "Going forward as Depot only" },
+      4 },
     { "v6.1", "14.10.2026",
       { "Паттерн теперь из правильной ветки (были .proto вместо сигнатур)",
         "Добавлена загрузка IPC-спеков (убирает третью ошибку)",
@@ -308,7 +318,7 @@ static void ensure_covers_thread() {
         // пул из 6 worker'ов — качаем параллельно, в разы быстрее
         std::atomic<int> next{0};
         auto worker = [&] {
-            HINTERNET hI = InternetOpenA("OpenSteamTool/4.6", INTERNET_OPEN_TYPE_PRECONFIG,
+            HINTERNET hI = InternetOpenA("Depot/6.2", INTERNET_OPEN_TYPE_PRECONFIG,
                 nullptr, nullptr, 0);
             if (!hI) return;
             DWORD to = 15000;
@@ -747,9 +757,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     ULONG_PTR gdiTok = 0;
     Gdiplus::GdiplusStartup(&gdiTok, &gsi, nullptr);
 
-    WNDCLASSEXA wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInst, nullptr, nullptr, nullptr, nullptr, "OSTImGui", nullptr };
+    WNDCLASSEXA wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInst, nullptr, nullptr, nullptr, nullptr, "DepotGUI", nullptr };
     ::RegisterClassExA(&wc);
-    HWND hwnd = ::CreateWindowA(wc.lpszClassName, "OpenSteamTool Installer",
+    HWND hwnd = ::CreateWindowA(wc.lpszClassName, "Depot",
         WS_OVERLAPPEDWINDOW, 100, 100, 980, 720, nullptr, nullptr, wc.hInstance, nullptr);
 
     // dark title bar
@@ -907,7 +917,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
     refresh_status();
     refresh_installed();
-    log_add("OpenSteamTool Installer v6.1");
+    log_add("Depot v6.2");
     log_add(tg("Готово. Установка — во вкладке «Настройки», игры — во вкладке «Игры».",
         "Ready. Installer is in «Settings», games are in «Games»."));
     load_theme();
@@ -1030,7 +1040,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::Dummy(ImVec2(26, 2));
             ImGui::SameLine();
             ImGui::PushFont(fontMain);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "OpenSteamTool");
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Depot");
             ImGui::PopFont();
             ImGui::PushFont(fontSmall);
             ImGui::TextColored(ImVec4(0.45f, 0.47f, 0.58f, 1.0f),
@@ -1038,7 +1048,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::PopFont();
             // пилюля версии
             {
-                const char* ver = "v6.1";
+                const char* ver = "v6.2";
                 ImVec2 tp = ImGui::GetCursorScreenPos();
                 ImVec2 tsz = ImGui::CalcTextSize(ver);
                 ImVec2 pad(10, 3);
@@ -1684,7 +1694,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                             IM_COL32(or_, og, ob, 6 + gi * 2));
                 }
                 ImGui::PushFont(fontTitle);
-                ImGui::TextColored(ImVec4(1, 1, 1, 1), "OpenSteamTool");
+                ImGui::TextColored(ImVec4(1, 1, 1, 1), "Depot");
                 ImGui::PopFont();
                 ImGui::PushFont(fontSmall);
                 ImGui::TextColored(ImVec4(0.65f, 0.67f, 0.75f, 1.0f),
