@@ -29,6 +29,7 @@
 | `src/common.h` | Общие типы, пути, язык |
 | `legacy/gui_win32.cpp` | Старый Win32 GUI (заброшен, оставлен для истории) |
 | `assets/payload.rc` | Ресурсы: 3 DLL как `RT_RCDATA` (ID 101–103), только для консольной сборки |
+| `assets/icon.rc` + `assets/icon.ico` | Иконка обоих exe (генерируется скриптом, коммитится готовый `.ico`) |
 | `assets/res/` | Папка с DLL перед компиляцией ресурсов (в репозиторий не входит) |
 | `build/depot.exe` | Собранная GUI-версия |
 | `third_party/imgui/` | Исходники Dear ImGui (клонируются отдельно, в репозиторий не входят) |
@@ -61,10 +62,12 @@
 :: 0. Для GUI: склонировать ImGui в third_party
 git clone --depth 1 https://github.com/ocornut/imgui.git third_party/imgui
 
-:: 1. GUI-версия (из корня репозитория)
+:: 1. GUI-версия, DLL уже вшиты (внешних файлов не нужно)
+windres -O coff -i assets/payload.rc -o build/payload.res
+windres -O coff -i assets/icon.rc -o build/icon.res
 g++.exe -O2 -std=c++17 -mwindows -static -fexec-charset=UTF-8 ^
   -Isrc -Ithird_party/imgui -Ithird_party/imgui/backends -o build/depot.exe ^
-  src/gui_imgui.cpp src/core.cpp src/ui.cpp ^
+  src/gui_imgui.cpp src/core.cpp src/ui.cpp build/payload.res build/icon.res ^
   third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp ^
   third_party/imgui/imgui_widgets.cpp third_party/imgui/imgui_demo.cpp ^
   third_party/imgui/backends/imgui_impl_win32.cpp third_party/imgui/backends/imgui_impl_dx11.cpp ^
@@ -72,8 +75,9 @@ g++.exe -O2 -std=c++17 -mwindows -static -fexec-charset=UTF-8 ^
 
 :: 2. Консольная версия (нужны DLL в assets\res\)
 windres -O coff -i assets/payload.rc -o build/payload.res
+windres -O coff -i assets/icon.rc -o build/icon.res
 g++.exe -O2 -std=c++17 -static -mconsole -fexec-charset=UTF-8 ^
-  -Isrc -o build/installer.exe src/main.cpp src/ui.cpp src/core.cpp build/payload.res -lshell32
+  -Isrc -o build/installer.exe src/main.cpp src/ui.cpp src/core.cpp build/payload.res build/icon.res -lshell32
 ```
 
 Без флага `-municode`: используются `PROCESSENTRY32A` / ANSI-версии WinAPI.

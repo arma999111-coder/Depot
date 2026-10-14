@@ -1,5 +1,6 @@
 build/installer.exe
 build/payload.res
+build/icon.res
 assets/res/*.dll
 assets/res/games.zip
 assets/res/pay*.lua

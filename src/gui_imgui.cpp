@@ -758,6 +758,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     Gdiplus::GdiplusStartup(&gdiTok, &gsi, nullptr);
 
     WNDCLASSEXA wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInst, nullptr, nullptr, nullptr, nullptr, "DepotGUI", nullptr };
+    wc.hIcon = LoadIconA(hInst, MAKEINTRESOURCEA(1));
+    wc.hIconSm = LoadIconA(hInst, MAKEINTRESOURCEA(1));
     ::RegisterClassExA(&wc);
     HWND hwnd = ::CreateWindowA(wc.lpszClassName, "Depot",
         WS_OVERLAPPEDWINDOW, 100, 100, 980, 720, nullptr, nullptr, wc.hInstance, nullptr);
