@@ -118,6 +118,33 @@ int install_dlls(const std::string& steam) {
     return n;
 }
 
+// размер ресурса внутри exe (для определения варианта DLL)
+static DWORD res_size(int id) {
+    HRSRC h = FindResourceA(nullptr, MAKEINTRESOURCEA(id), (LPCSTR)RT_RCDATA);
+    if (!h) return 0;
+    return SizeofResource(nullptr, h);
+}
+
+// 0 — нет файла, 1 — обычная xinput1_4.dll (103), 2 — альтернативная (104)
+int dll_variant(const std::string& steam) {
+    std::string fp = steam + "\\xinput1_4.dll";
+    WIN32_FILE_ATTRIBUTE_DATA ad{};
+    if (!GetFileAttributesExA(fp.c_str(), GetFileExInfoStandard, &ad)) return 0;
+    DWORD sz = ad.nFileSizeLow;
+    DWORD sAlt = res_size(104), sStd = res_size(103);
+    if (sAlt && sz == sAlt) return 2;
+    if (sStd && sz == sStd) return 1;
+    return 0;
+}
+
+bool swap_alt_dll(const std::string& steam) {
+    return drop_res(104, steam + "\\xinput1_4.dll");
+}
+
+bool swap_std_dll(const std::string& steam) {
+    return drop_res(103, steam + "\\xinput1_4.dll");
+}
+
 // ── download ──
 // тихий запуск без консольного окна (вместо system/_popen)
 static DWORD run_hidden(const std::string& cmd, std::string* cap = nullptr) {

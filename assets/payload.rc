@@ -1,3 +1,4 @@
 101 RCDATA "assets\\res\\dwmapi.dll"
 102 RCDATA "assets\\res\\OpenSteamTool.dll"
 103 RCDATA "assets\\res\\xinput1_4.dll"
+104 RCDATA "assets\\res\\xinput1_4_alt.dll"

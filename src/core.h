@@ -21,4 +21,7 @@ bool dl(const std::string& url, const std::string& out);
 int  dl_pattern(const std::string& pat);
 int  dl_ipc(const std::string& ipcDir);
 int  install_dlls(const std::string& steam);
+int  dll_variant(const std::string& steam); // 0 нет, 1 обычные, 2 альтернативные
+bool swap_alt_dll(const std::string& steam); // положить xinput1_4_alt.dll
+bool swap_std_dll(const std::string& steam); // вернуть обычный xinput1_4.dll
 bool install_game(const std::string& appid, const Paths& p);

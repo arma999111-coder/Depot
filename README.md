@@ -43,6 +43,7 @@
 | 101 | `dwmapi.dll` | Подхватывается Steam при старте |
 | 102 | `OpenSteamTool.dll` | Основная DLL инструмента |
 | 103 | `xinput1_4.dll` | Ещё одна точка загрузки Steam |
+| 104 | `xinput1_4_alt.dll` | Альтернативный xinput (кнопка «Заменить DLL» в настройках) |
 
 **Эти DLL не мои.** Взяты из проекта [OpenSteamTool](https://github.com/OpenSteam001) как есть, без изменений. Бинарники не входят в репозиторий — перед сборкой положите их в `assets/res/`. Внимание: антивирус может ругаться/удалять эти файлы — добавьте папку проекта в исключения Defender.
 
@@ -71,7 +72,7 @@ g++.exe -O2 -std=c++17 -mwindows -static -fexec-charset=UTF-8 ^
   third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp ^
   third_party/imgui/imgui_widgets.cpp third_party/imgui/imgui_demo.cpp ^
   third_party/imgui/backends/imgui_impl_win32.cpp third_party/imgui/backends/imgui_impl_dx11.cpp ^
-  -ld3d11 -ldxgi -ld3dcompiler -ldwmapi -lgdiplus -lwininet -lshell32 -lgdi32 -luser32
+  -ld3d11 -ldxgi -ld3dcompiler -ldwmapi -lgdiplus -lwininet -lshell32 -lgdi32 -luser32 -lwinmm
 
 :: 2. Консольная версия (нужны DLL в assets\res\)
 windres -O coff -i assets/payload.rc -o build/payload.res
