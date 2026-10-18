@@ -80,6 +80,7 @@ static int g_catSel = 0; // индекс в kCats
 static float g_featTgt = 0.0f; // цель прокрутки витрины
 static int g_sort = 0; // 0 = по имени, 1 = по AppID
 static bool g_onlyInst = false; // только установленные
+static bool g_onlyFav = false;  // только избранное
 
 // ── новости обновлений ──
 struct NewsItem {
@@ -91,6 +92,16 @@ struct NewsItem {
 };
 
 static const NewsItem kNews[] = {
+    { "v6.7", "18.10.2026",
+      { "Избранное: сердечко на карточке и вкладка «Избранное»",
+        "Звук завершения установки + всплывающие уведомления",
+        "Проверка обновлений Depot прямо с GitHub",
+        "Кнопка «Скачать», если вышла новая версия" },
+      { "Favorites: heart on the card and a «Favorites» tab",
+        "Install-complete sound + popup notifications",
+        "Depot update check straight from GitHub",
+        "A «Download» button when a new version is out" },
+      4 },
     { "v6.6", "14.10.2026",
       { "Витрина уезжает вверх при скролле",
         "Красивые кнопки с рамкой и иконкой",
@@ -354,7 +365,7 @@ static void ensure_covers_thread() {
         // пул из 6 worker'ов — качаем параллельно, в разы быстрее
         std::atomic<int> next{0};
         auto worker = [&] {
-            HINTERNET hI = InternetOpenA("Depot/6.2", INTERNET_OPEN_TYPE_PRECONFIG,
+            HINTERNET hI = InternetOpenA("Depot/" DEPOT_VER, INTERNET_OPEN_TYPE_PRECONFIG,
                 nullptr, nullptr, 0);
             if (!hI) return;
             DWORD to = 15000;
@@ -591,6 +602,132 @@ static void refresh_installed() {
     }
 }
 
+// ── избранное ──
+static std::set<std::string> g_favorites;
+static std::string favorites_record() { return tmp_path() + "/ost_favs.txt"; }
+static void save_favorites() {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, widen(favorites_record()).c_str(), L"w") == 0 && f) {
+        for (auto& s : g_favorites) fprintf(f, "%s\n", s.c_str());
+        fclose(f);
+    }
+}
+static void load_favorites() {
+    g_favorites.clear();
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, widen(favorites_record()).c_str(), L"r") == 0 && f) {
+        char line[64];
+        while (fgets(line, sizeof(line), f)) {
+            std::string s = line;
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+            if (!s.empty()) g_favorites.insert(s);
+        }
+        fclose(f);
+    }
+}
+static void toggle_favorite(const std::string& appid) {
+    if (g_favorites.count(appid)) g_favorites.erase(appid);
+    else g_favorites.insert(appid);
+    save_favorites();
+}
+
+// ── toast-уведомления (всплывающие карточки) ──
+struct Toast { std::string text; int type; double t0; };
+static std::vector<Toast> g_toasts;
+static std::mutex g_toastMutex;
+static double now_sec() { return (double)GetTickCount64() / 1000.0; }
+static void toast(const std::string& s, int type = 0) {
+    std::lock_guard<std::mutex> lk(g_toastMutex);
+    if (g_toasts.size() > 6) g_toasts.erase(g_toasts.begin());
+    g_toasts.push_back({ s, type, now_sec() });
+}
+static void ding() { MessageBeep(MB_ICONASTERISK); }
+static ImFont* g_fontSmall = nullptr;
+static ImFont* g_fontTitle = nullptr;
+static void draw_toasts() {
+    std::lock_guard<std::mutex> lk(g_toastMutex);
+    double now = now_sec();
+    for (size_t i = 0; i < g_toasts.size();) {
+        if (now - g_toasts[i].t0 > 3.6) g_toasts.erase(g_toasts.begin() + i);
+        else ++i;
+    }
+    if (g_toasts.empty()) return;
+    ImDrawList* fdl = ImGui::GetForegroundDrawList();
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    float pad = 16.0f, w = 330.0f, h = 56.0f, gap = 10.0f;
+    int n = (int)g_toasts.size();
+    for (int i = 0; i < n; i++) {
+        const Toast& t = g_toasts[i];
+        double age = now - t.t0;
+        float appear = (float)fmin(1.0, age / 0.25);
+        float fade = age > 3.0 ? (float)(1.0 - (age - 3.0) / 0.6) : 1.0f;
+        if (fade < 0) fade = 0;
+        float a = appear * fade;
+        float y = ds.y - pad - h - (float)(n - 1 - i) * (h + gap);
+        float x = ds.x - pad - w + (1.0f - appear) * 46.0f;
+        ImVec4 ac = t.type == 1 ? ImVec4(0.92f, 0.28f, 0.30f, 1.0f)
+            : t.type == 2 ? ImVec4(0.20f, 0.55f, 1.0f, 1.0f)
+            : ImVec4(0.13f, 0.78f, 0.42f, 1.0f);
+        ImU32 acc = ImGui::ColorConvertFloat4ToU32(ImVec4(ac.x, ac.y, ac.z, a));
+        ImU32 white = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, a));
+        fdl->AddRectFilled(ImVec2(x + 3, y + 4), ImVec2(x + w + 3, y + h + 4),
+            IM_COL32(0, 0, 0, (int)(a * 130)), 12.0f);
+        fdl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(16, 16, 24, (int)(a * 246)), 12.0f);
+        fdl->AddRectFilled(ImVec2(x, y + 9), ImVec2(x + 4, y + h - 9), acc, 2.0f);
+        fdl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(ac.x, ac.y, ac.z, a * 0.55f)), 12.0f, 0, 1.5f);
+        ImVec2 ic(x + 32, y + h * 0.5f);
+        fdl->AddCircleFilled(ic, 16.0f, ImGui::ColorConvertFloat4ToU32(ImVec4(ac.x, ac.y, ac.z, a * 0.18f)), 24);
+        if (t.type == 1) { // ✕
+            fdl->AddLine(ImVec2(ic.x - 6, ic.y - 6), ImVec2(ic.x + 6, ic.y + 6), acc, 3.0f);
+            fdl->AddLine(ImVec2(ic.x + 6, ic.y - 6), ImVec2(ic.x - 6, ic.y + 6), acc, 3.0f);
+        } else if (t.type == 2) { // i
+            fdl->AddCircleFilled(ImVec2(ic.x, ic.y - 6), 2.4f, acc, 12);
+            fdl->AddLine(ImVec2(ic.x, ic.y - 1), ImVec2(ic.x, ic.y + 7), acc, 3.0f);
+        } else { // ✓
+            fdl->AddLine(ImVec2(ic.x - 7, ic.y + 1), ImVec2(ic.x - 2, ic.y + 6), white, 3.0f);
+            fdl->AddLine(ImVec2(ic.x - 2, ic.y + 6), ImVec2(ic.x + 7, ic.y - 6), white, 3.0f);
+        }
+        std::string txt = trunc1(t.text.c_str(), w - 70);
+        fdl->AddText(g_fontSmall, 15.0f, ImVec2(x + 58, y + h * 0.5f - 8), white, txt.c_str());
+    }
+}
+
+// ── авто-обновление: сверяем версию с GitHub ──
+static std::atomic<bool> g_updateChecked{false};
+static std::string g_updateVer;
+static std::mutex g_updateMutex;
+static void check_update_async() {
+    if (g_updateChecked.exchange(true)) return;
+    std::thread([] {
+        char buf[256] = { 0 };
+        bool got = false;
+        HINTERNET hI = InternetOpenA("Depot/" DEPOT_VER, INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+        if (hI) {
+            DWORD to = 8000;
+            InternetSetOptionA(hI, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
+            InternetSetOptionA(hI, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
+            HINTERNET hU = InternetOpenUrlA(hI,
+                "https://raw.githubusercontent.com/arma999111-coder/Depot/master/VERSION",
+                nullptr, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
+            if (hU) {
+                DWORD rd = 0;
+                if (InternetReadFile(hU, buf, sizeof(buf) - 1, &rd) && rd) { buf[rd] = 0; got = true; }
+                InternetCloseHandle(hU);
+            }
+            InternetCloseHandle(hI);
+        }
+        if (!got) return;
+        std::string v = buf;
+        while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) v.pop_back();
+        auto parse = [](const std::string& s) { int a = 0, b = 0; sscanf(s.c_str(), "%d.%d", &a, &b); return a * 1000 + b; };
+        if (!v.empty() && parse(v) > parse(DEPOT_VER)) {
+            { std::lock_guard<std::mutex> lk(g_updateMutex); g_updateVer = v; }
+            toast(std::string("Доступно обновление v") + v, 2);
+        }
+    }).detach();
+}
+
 static void run_async(std::function<void()> fn) {
     if (g_busy.exchange(true)) return;
     std::thread([fn] {
@@ -626,6 +763,8 @@ static void do_full_install() {
         log_add(tg("Готово! Введите AppID и нажмите «Добавить».", "Done! Enter AppID and click Add."));
         set_progress_s(100);
         set_status_s(tg("Готово — введите AppID", "Done — enter AppID"));
+        toast(tg("Установка завершена", "Setup complete"));
+        ding();
     });
 }
 
@@ -669,11 +808,11 @@ static void do_swap_dll() {
         if (steam_running()) kill_steam();
         int v = dll_variant(g_paths.steam);
         if (v == 2) {
-            if (swap_std_dll(g_paths.steam)) log_add(tg("вернул обычные DLL", "restored standard DLLs"));
-            else log_add(tg("ошибка замены", "swap error"));
+            if (swap_std_dll(g_paths.steam)) { log_add(tg("вернул обычные DLL", "restored standard DLLs")); toast(tg("Обычные DLL возвращены", "Standard DLLs restored")); }
+            else { log_add(tg("ошибка замены", "swap error")); toast(tg("Ошибка замены DLL", "DLL swap error"), 1); }
         } else {
-            if (swap_alt_dll(g_paths.steam)) log_add(tg("поставил альтернативные DLL", "installed alternative DLLs"));
-            else log_add(tg("ошибка замены", "swap error"));
+            if (swap_alt_dll(g_paths.steam)) { log_add(tg("поставил альтернативные DLL", "installed alternative DLLs")); toast(tg("Альтернативные DLL установлены", "Alternative DLLs installed")); }
+            else { log_add(tg("ошибка замены", "swap error")); toast(tg("Ошибка замены DLL", "DLL swap error"), 1); }
         }
         refresh_status();
     });
@@ -722,9 +861,14 @@ static void do_add_game(const std::string& appid) {
             log_add(tg("установлено!", "installed!"));
             set_status_s(tg("Игра установлена", "Game installed"));
             mark_installed(appid);
+            const char* nm = install_name(appid);
+            toast(std::string("«") + (nm ? nm : appid.c_str()) + tg("» установлена", "» installed"));
+            ding();
         } else {
             log_add(tg("ошибка скачивания", "download error"));
             set_status_s(tg("Ошибка скачивания", "Download error"));
+            const char* nm = install_name(appid);
+            toast(std::string(tg("Ошибка: ", "Error: ")) + (nm ? nm : appid.c_str()), 1);
         }
         set_progress_s(100);
     });
@@ -946,6 +1090,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         if (fontTitle) break;
     }
     if (!fontTitle) fontTitle = fontMain;
+    g_fontTitle = fontTitle;
 
     // small font for hints (brighter + snapped = readable)
     ImFont* fontSmall = nullptr;
@@ -959,6 +1104,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         if (fontSmall) break;
     }
     if (!fontSmall) fontSmall = fontMain;
+    g_fontSmall = fontSmall;
 
     // monospace font for log
     ImFont* fontMono = nullptr;
@@ -979,10 +1125,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
     refresh_status();
     refresh_installed();
-    log_add("Depot v6.6");
+    log_add(std::string("Depot ") + DEPOT_VER_TAG);
     log_add(tg("Готово. Установка — во вкладке «Настройки», игры — во вкладке «Игры».",
         "Ready. Installer is in «Settings», games are in «Games»."));
     load_theme();
+    load_favorites();
+    check_update_async();
 
     bool done = false;
     while (!done) {
@@ -1110,7 +1258,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::PopFont();
             // пилюля версии
             {
-                const char* ver = "v6.6";
+                const char* ver = DEPOT_VER_TAG;
                 ImVec2 tp = ImGui::GetCursorScreenPos();
                 ImVec2 tsz = ImGui::CalcTextSize(ver);
                 ImVec2 pad(10, 3);
@@ -1129,9 +1277,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::PopFont();
             ImGui::Spacing();
             // компактные кнопки навигации
-            auto nav_btn = [&](int idx, const char* label) {
+            auto nav_btn = [&](const char* label, int tab, bool fav) {
+                bool active = (g_tab == tab) && (g_onlyFav == fav);
                 ImVec2 sz(ImGui::GetContentRegionAvail().x, 40);
-                if (g_tab == idx) {
+                if (active) {
                     accent_btn(label, sz, g_accent);
                     ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
                     g_selX = mn.x - 8; g_selY0 = mn.y; g_selY1 = mx.y;
@@ -1142,17 +1291,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.10f));
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.63f, 0.70f, 1.0f));
                     if (ImGui::Button(label, sz)) {
-                        g_tab = idx;
-                        if (idx == 1) { ensure_covers_thread(); refresh_installed(); }
+                        g_tab = tab;
+                        g_onlyFav = fav;
+                        if (tab == 1) { ensure_covers_thread(); refresh_installed(); }
                     }
                     ImGui::PopStyleColor(4);
                 }
             };
-            nav_btn(0, tg("Главная", "Home"));
             char tabGames[64];
             snprintf(tabGames, sizeof(tabGames), "%s (%d)", tg("Игры", "Games"), kGamesCount);
-            nav_btn(1, tabGames);
-            nav_btn(2, tg("Настройки", "Settings"));
+            char tabFav[64];
+            snprintf(tabFav, sizeof(tabFav), "%s (%d)", tg("Избранное", "Favorites"), (int)g_favorites.size());
+            nav_btn(tg("Главная", "Home"), 0, false);
+            nav_btn(tabGames, 1, false);
+            nav_btn(tabFav, 1, true);
+            nav_btn(tg("Настройки", "Settings"), 2, false);
             // скользящий неоновый индикатор
             {
                 float k = 1.0f - expf(-ImGui::GetIO().DeltaTime * 14.0f);
@@ -1228,7 +1381,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         {
             ImGui::PushFont(fontTitle);
             const char* ttl = g_tab == 0 ? tg("Новости обновлений", "Update news")
-                : g_tab == 1 ? tg("Каталог игр", "Game catalog")
+                : g_tab == 1 ? (g_onlyFav ? tg("Избранное", "Favorites") : tg("Каталог игр", "Game catalog"))
                 : tg("Настройки", "Settings");
             ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", ttl);
             ImGui::PopFont();
@@ -1499,6 +1652,33 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
         ImGui::Spacing();
 
+        // ── ОБНОВЛЕНИЕ: сверка версии с GitHub ──
+        ImGui::PushFont(fontSmall);
+        ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), tg("ОБНОВЛЕНИЕ", "UPDATE"));
+        ImGui::PopFont();
+        {
+            ImGui::TextDisabled("%s %s", tg("Версия", "Version"), DEPOT_VER_TAG);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tg("Проверить обновления", "Check for updates"))) {
+                g_updateChecked = false;
+                { std::lock_guard<std::mutex> lk(g_updateMutex); g_updateVer.clear(); }
+                check_update_async();
+            }
+            std::string uv;
+            { std::lock_guard<std::mutex> lk(g_updateMutex); uv = g_updateVer; }
+            if (!uv.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.76f, 0.22f, 1.0f),
+                    tg("Доступна версия v%s", "Version v%s available"), uv.c_str());
+                ImGui::SameLine();
+                if (accent_btn(tg("Скачать", "Download"), ImVec2(130, 0), ImVec4(0.85f, 0.52f, 0.10f, 1.0f)))
+                    ShellExecuteA(nullptr, "open",
+                        "https://github.com/arma999111-coder/Depot/releases/latest",
+                        nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+
+        ImGui::Spacing();
+
         // ── ЖУРНАЛ ──
         ImGui::PushFont(fontSmall);
         ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), tg("ЖУРНАЛ", "LOG"));
@@ -1601,6 +1781,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 const GameEntry* ge = &kGames[i];
                 if (g_catSel != 0 && strcmp(ge->cat, kCats[g_catSel].key) != 0) continue;
                 if (g_onlyInst && g_installed.count(ge->appid) == 0) continue;
+                if (g_onlyFav && g_favorites.count(ge->appid) == 0) continue;
                 if (g_searchBuf[0]) {
                     if (!contains_ci(ge->name, g_searchBuf) && !strstr(ge->appid, g_searchBuf))
                         continue;
@@ -1617,7 +1798,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             {
                 static std::string lastKey;
                 char key[128];
-                snprintf(key, sizeof(key), "%s|%d|%d|%d", g_searchBuf, g_catSel, g_sort, (int)g_onlyInst);
+                snprintf(key, sizeof(key), "%s|%d|%d|%d|%d", g_searchBuf, g_catSel, g_sort, (int)g_onlyInst, (int)g_onlyFav);
                 if (lastKey != key) {
                     lastKey = key;
                     g_scrollTgt["##grid"] = 0.0f;
@@ -1632,11 +1813,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 (int)list.size(), (int)g_installed.size(), (int)g_covers.size(), kGamesCount);
             ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), "%s", foundBuf);
             ImGui::PopFont();
-            ImGui::SameLine(pw - 250);
+            ImGui::SameLine(pw - 360);
             if (ImGui::SmallButton(g_sort == 0 ? tg("Сорт: А-Я", "Sort: A-Z") : tg("Сорт: ID", "Sort: ID")))
                 g_sort ^= 1;
             ImGui::SameLine();
             ImGui::Checkbox(tg("Установленные", "Installed"), &g_onlyInst);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.94f, 0.24f, 0.34f, 1.0f));
+            ImGui::Checkbox(tg("Избранное", "Favorites"), &g_onlyFav);
+            ImGui::PopStyleColor();
 
             float gridH = ImGui::GetContentRegionAvail().y - 40;
             if (gridH < 100) gridH = 100;
@@ -1652,7 +1837,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             float imgH = imgW * 353.0f / 616.0f; // capsule_616x353
 
             // ── витрина хитов: едет вверх вместе со скроллом сетки ──
-            if (!g_searchBuf[0] && g_catSel == 0 && !g_onlyInst) {
+            if (!g_searchBuf[0] && g_catSel == 0 && !g_onlyInst && !g_onlyFav) {
                 float featW = ImGui::GetContentRegionAvail().x;
                 ImGui::PushFont(fontSmall);
                 ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), tg("ХИТЫ НЕДЕЛИ", "TOP HITS"));
@@ -1783,15 +1968,39 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         IM_COL32(5, 5, 10, 170), 5.0f);
                     ImGui::SetCursorScreenPos(ImVec2(pp.x + 6, pp.y + 3));
                     ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", cname);
-                    // зелёный бейдж «установлена» справа сверху
+                    // зелёный бейдж «установлена» (сдвинут левее под сердечко)
                     if (g_installed.count(ge->appid)) {
                         const char* mk = "✓";
                         ImVec2 mz = ImGui::CalcTextSize(mk);
-                        ImVec2 mp(imx.x - mz.x - 18, imn.y + 6);
+                        ImVec2 mp(imx.x - mz.x - 54, imn.y + 6);
                         cdl->AddRectFilled(mp, ImVec2(mp.x + mz.x + 12, mp.y + mz.y + 6),
                             IM_COL32(10, 140, 70, 200), 5.0f);
                         ImGui::SetCursorScreenPos(ImVec2(mp.x + 6, mp.y + 3));
                         ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", mk);
+                    }
+                    // сердечко-избранное справа сверху
+                    {
+                        float hs = 30.0f;
+                        ImVec2 hc(imx.x - hs * 0.5f - 6, imn.y + hs * 0.5f + 6);
+                        bool fav = g_favorites.count(ge->appid) > 0;
+                        cdl->AddCircleFilled(hc, hs * 0.5f, IM_COL32(5, 5, 10, fav ? 205 : 150), 24);
+                        auto heart = [&](ImVec2 c, float r, ImU32 col) {
+                            ImVec2 l(c.x - r * 0.42f, c.y - r * 0.22f), rr(c.x + r * 0.42f, c.y - r * 0.22f);
+                            cdl->AddCircleFilled(l, r * 0.5f, col, 18);
+                            cdl->AddCircleFilled(rr, r * 0.5f, col, 18);
+                            cdl->AddTriangleFilled(ImVec2(c.x - r * 0.85f, c.y - r * 0.02f),
+                                ImVec2(c.x + r * 0.85f, c.y - r * 0.02f), ImVec2(c.x, c.y + r * 0.88f), col);
+                        };
+                        if (fav) heart(hc, 11.0f, IM_COL32(240, 60, 82, 255));
+                        else { heart(hc, 12.0f, IM_COL32(232, 232, 242, 225)); heart(hc, 9.5f, IM_COL32(6, 6, 12, 255)); }
+                        ImGui::SetCursorScreenPos(ImVec2(hc.x - hs * 0.5f, hc.y - hs * 0.5f));
+                        ImGui::InvisibleButton("##fav", ImVec2(hs, hs));
+                        if (ImGui::IsItemClicked()) toggle_favorite(ge->appid);
+                        if (ImGui::IsItemHovered()) {
+                            cdl->AddCircle(hc, hs * 0.5f + 2, accentU32, 24, 2.0f);
+                            ImGui::SetTooltip("%s", fav ? tg("Убрать из избранного", "Remove from favorites")
+                                                        : tg("В избранное", "Add to favorites"));
+                        }
                     }
                     ImGui::SetCursorPos(saved);
                 } else {
@@ -2168,6 +2377,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::PopFont();
             ImGui::End(); // ##install
         }
+
+        draw_toasts();
 
         ImGui::Render();
         const float clear_color[4] = { 0.016f, 0.016f, 0.022f, 1.00f };

@@ -31,6 +31,10 @@ inline const char* tr(const char* ru, const char* en) { return g_lang ? en : ru;
 
 #define W 52
 
+// версия приложения (для проверки обновлений на GitHub)
+#define DEPOT_VER "6.7"
+#define DEPOT_VER_TAG "v6.7"
+
 // steam paths
 struct Paths {
     std::string steam, ost, ipc, pat, lua, stp, depot;
