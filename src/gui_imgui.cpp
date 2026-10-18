@@ -1115,6 +1115,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     }
     if (!fontLogo) fontLogo = fontTitle;
 
+    // splash display font (крупный логотип заставки)
+    ImFont* fontSplash = nullptr;
+    ImFontConfig cfgSp;
+    cfgSp.OversampleH = 2;
+    cfgSp.OversampleV = 2;
+    for (const char* fp : { "C:\\Windows\\Fonts\\bahnschrift.ttf", "C:\\Windows\\Fonts\\seguisb.ttf",
+                             "C:\\Windows\\Fonts\\segoeuib.ttf" }) {
+        fontSplash = io.Fonts->AddFontFromFileTTF(fp, 54.0f, &cfgSp, kFontRanges);
+        if (fontSplash) break;
+    }
+    if (!fontSplash) fontSplash = fontTitle;
+
     // navigation + section font (semibold)
     ImFont* fontNav = nullptr;
     ImFontConfig cfgNav;
@@ -2450,9 +2462,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             double nowB = ImGui::GetTime();
             if (boot0 < 0) boot0 = nowB;
             double bt = nowB - boot0;
-            if (bt < 1.6) {
-                float ba = (bt < 1.2) ? 1.0f : (float)(1.0 - (bt - 1.2) / 0.4);
-                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ba);
+            if (bt < 1.8) {
                 ImGui::SetNextWindowPos(ImVec2(0, 0));
                 ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
                 ImGui::Begin("##splash", nullptr,
@@ -2462,34 +2472,127 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     ImGuiWindowFlags_NoBackground);
                 ImDrawList* bdl = ImGui::GetWindowDrawList();
                 ImVec2 bs = ImGui::GetIO().DisplaySize;
-                bdl->AddRectFilled(ImVec2(0, 0), bs, IM_COL32(4, 4, 6, 255));
+                float t = (float)bt;
                 float cx = bs.x * 0.5f, cy = bs.y * 0.5f;
-                float pulse = 0.5f + 0.5f * sinf((float)nowB * 4.0f);
                 ImU32 acb = ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 1.0f));
-                bdl->AddCircleFilled(ImVec2(cx, cy - 70), 34.0f + pulse * 4.0f,
-                    ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.25f)));
-                bdl->AddCircleFilled(ImVec2(cx, cy - 70), 22.0f, acb);
-                bdl->AddCircleFilled(ImVec2(cx, cy - 70), 9.0f, IM_COL32(4, 4, 6, 255));
-                ImGui::PushFont(fontLogo);
-                ImVec2 ttz = ImGui::CalcTextSize("Depot");
-                ImGui::SetCursorScreenPos(ImVec2(cx - ttz.x * 0.5f, cy - 24));
-                ImGui::TextColored(ImVec4(1, 1, 1, 1), "Depot");
-                ImGui::PopFont();
+                auto ss = [](float x) { if (x < 0) x = 0; if (x > 1) x = 1; return x * x * (3.0f - 2.0f * x); };
+                auto back = [](float x) { if (x < 0) x = 0; if (x > 1) x = 1; float c1 = 1.70158f, c3 = c1 + 1.0f;
+                    float u = x - 1.0f; return 1.0f + c3 * u * u * u + c1 * u * u; };
+                float fadeOut = (t < 1.25f) ? 1.0f : (t < 1.8f ? 1.0f - (t - 1.25f) / 0.55f : 0.0f);
+                if (fadeOut < 0) fadeOut = 0;
+                int fo = (int)(fadeOut * 255.0f);
+                float prog = (t > 1.5f) ? 1.0f : t / 1.5f;
+
+                // фон + мягкое радиальное свечение
+                bdl->AddRectFilled(ImVec2(0, 0), bs, IM_COL32(4, 4, 6, (int)(255 * fadeOut)));
+                {
+                    int acR = (int)(g_accent.x * 255), acG = (int)(g_accent.y * 255), acB = (int)(g_accent.z * 255);
+                    int aa = (int)(2.4f * fadeOut);
+                    for (int i2 = 68; i2 >= 0; i2--) {
+                        float rr = 46.0f + i2 * 6.2f;
+                        bdl->AddCircleFilled(ImVec2(cx, cy - 46), rr, IM_COL32(acR, acG, acB, aa), 44);
+                    }
+                }
+                // парящие частицы
+                for (int i2 = 0; i2 < 54; i2++) {
+                    float fx = fmodf(i2 * 97.13f + 11.0f, bs.x);
+                    float spd = 12.0f + fmodf(i2 * 13.7f, 30.0f);
+                    float fy = bs.y + 30.0f - fmodf(t * spd + i2 * 61.0f, bs.y + 60.0f);
+                    float sz = 1.0f + fmodf(i2 * 7.3f, 2.0f);
+                    int aa = (int)((18.0f + 46.0f * (0.5f + 0.5f * sinf(t * 2.0f + i2 * 1.7f))) * fadeOut);
+                    bdl->AddCircleFilled(ImVec2(fx, fy), sz, IM_COL32(190, 198, 235, aa), 8);
+                }
+
+                float app = ss(t / 0.5f);
+                float bs2 = 106.0f * (0.65f + 0.35f * back((t - 0.05f) / 0.6f));
+                ImVec2 bc(cx, cy - 70.0f);
+                float pulse = 0.5f + 0.5f * sinf(t * 3.0f);
+                // пульсирующее свечение
+                bdl->AddCircleFilled(bc, bs2 * 0.99f + pulse * 9.0f,
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.15f * app * fadeOut)), 64);
+                // вращающееся двухцветное кольцо
+                float rot = t * 1.5f;
+                bdl->PathArcTo(bc, bs2 * 0.72f, rot, rot + 4.7f, 40);
+                bdl->PathStroke(ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.85f * app * fadeOut)), 0, 3.0f);
+                bdl->PathArcTo(bc, bs2 * 0.72f, rot + 3.1416f, rot + 3.1416f + 4.7f, 40);
+                bdl->PathStroke(IM_COL32(255, 255, 255, (int)(60 * app * fadeOut)), 0, 3.0f);
+                // сам бейдж
+                ImVec2 b0(bc.x - bs2 * 0.5f, bc.y - bs2 * 0.5f), b1(bc.x + bs2 * 0.5f, bc.y + bs2 * 0.5f);
+                bdl->AddRectFilled(b0, b1, IM_COL32(20, 20, 31, 255), bs2 * 0.24f);
+                bdl->AddRect(b0, b1, ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.55f * app * fadeOut)), bs2 * 0.24f, 0, 2.0f);
+                bdl->AddCircleFilled(bc, bs2 * 0.26f, acb, 32);
+                bdl->AddCircleFilled(bc, bs2 * 0.11f, IM_COL32(6, 6, 12, 255), 20);
+                // лёгкий блик по бейджу
+                {
+                    bdl->PushClipRect(b0, b1, true);
+                    float shx = b0.x + (b1.x - b0.x) * (fmodf(t * 0.8f, 1.6f) - 0.3f);
+                    bdl->AddLine(ImVec2(shx, b0.y - 10), ImVec2(shx - 34, b1.y + 10), IM_COL32(255, 255, 255, (int)(30 * app * fadeOut)), 24.0f);
+                    bdl->PopClipRect();
+                }
+
+                // заголовок с подъёмом
+                {
+                    float ta = ss((t - 0.28f) / 0.55f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ta * fadeOut);
+                    ImGui::PushFont(fontSplash);
+                    ImVec2 ttz = ImGui::CalcTextSize("Depot");
+                    ImGui::SetCursorScreenPos(ImVec2(cx - ttz.x * 0.5f, cy + 2.0f));
+                    ImGui::TextColored(ImVec4(1, 1, 1, 1), "Depot");
+                    ImGui::PopFont();
+                    ImGui::PopStyleVar();
+                }
+                {
+                    float ga = ss((t - 0.45f) / 0.5f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ga * fadeOut);
+                    ImGui::PushFont(fontSmall);
+                    const char* tag = tg("Steam-игры в один клик", "One-click Steam games");
+                    ImVec2 gz = ImGui::CalcTextSize(tag);
+                    ImGui::SetCursorScreenPos(ImVec2(cx - gz.x * 0.5f, cy + 66.0f));
+                    ImGui::TextColored(ImVec4(0.55f, 0.57f, 0.68f, 1.0f), "%s", tag);
+                    ImGui::PopFont();
+                    ImGui::PopStyleVar();
+                }
+
+                // прогресс-бар с бегущим блеском и процентом
+                float pbA = ss((t - 0.35f) / 0.5f) * fadeOut;
+                float bw2 = 300.0f;
+                ImVec2 bp(cx - bw2 * 0.5f, cy + 96.0f);
+                ImVec2 bp1(bp.x + bw2, bp.y + 8.0f);
+                bdl->AddRectFilled(bp, bp1, IM_COL32(24, 24, 36, (int)(255 * pbA)), 4.0f);
+                float fxb = bp.x + bw2 * prog;
+                if (fxb > bp.x + 0.5f) {
+                    bdl->PushClipRect(bp, bp1, true);
+                    bdl->AddRectFilledMultiColor(bp, ImVec2(fxb, bp1.y),
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, pbA)),
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(fminf(1.0f, g_accent.x + 0.25f), fminf(1.0f, g_accent.y + 0.25f), fminf(1.0f, g_accent.z + 0.25f), pbA)),
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, pbA)),
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, pbA)));
+                    // бегущий блик
+                    float shx2 = bp.x + fmodf(t * 0.9f, 1.3f) * bw2;
+                    bdl->AddRectFilled(ImVec2(shx2 - 40, bp.y), ImVec2(shx2 + 40, bp1.y),
+                        IM_COL32(255, 255, 255, (int)(40 * pbA)), 0.0f);
+                    // светящийся кончик
+                    bdl->AddCircleFilled(ImVec2(fxb, bp.y + 4.0f), 6.0f,
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.8f * pbA)), 16);
+                    bdl->PopClipRect();
+                }
+                // фаза загрузки
                 ImGui::PushFont(fontSmall);
-                const char* phase = bt < 0.5 ? tg("Загрузка шрифтов...", "Loading fonts...")
-                    : bt < 1.0 ? tg("Поиск Steam...", "Finding Steam...")
+                const char* phase = t < 0.55 ? tg("Загрузка шрифтов...", "Loading fonts...")
+                    : t < 1.1 ? tg("Поиск Steam...", "Finding Steam...")
                     : tg("Готово!", "Ready!");
                 ImVec2 phz = ImGui::CalcTextSize(phase);
-                ImGui::SetCursorScreenPos(ImVec2(cx - phz.x * 0.5f, cy + 28));
-                ImGui::TextColored(ImVec4(0.55f, 0.57f, 0.65f, 1.0f), "%s", phase);
-                ImGui::PopFont();
-                float bw2 = 260.0f;
-                ImVec2 bp(cx - bw2 * 0.5f, cy + 58);
-                bdl->AddRectFilled(bp, ImVec2(bp.x + bw2, bp.y + 6), IM_COL32(25, 25, 38, 255), 3.0f);
-                float fxb = bp.x + bw2 * (float)(bt > 1.4 ? 1.0 : bt / 1.4);
-                if (fxb > bp.x) bdl->AddRectFilled(bp, ImVec2(fxb, bp.y + 6), acb, 3.0f);
-                ImGui::End();
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ss((t - 0.5f) / 0.4f) * fadeOut);
+                ImGui::SetCursorScreenPos(ImVec2(cx - phz.x * 0.5f, bp1.y + 12.0f));
+                ImGui::TextColored(ImVec4(0.52f, 0.54f, 0.63f, 1.0f), "%s", phase);
                 ImGui::PopStyleVar();
+                char pc[16];
+                snprintf(pc, sizeof(pc), "%d%%", (int)(prog * 100.0f + 0.5f));
+                ImGui::SetCursorScreenPos(ImVec2(cx + bw2 * 0.5f + 16.0f, bp.y - 6.0f));
+                ImGui::TextColored(ImVec4(g_accent.x, g_accent.y, g_accent.z, 1.0f), "%s", pc);
+                ImGui::PopFont();
+
+                ImGui::End();
             }
         }
 
