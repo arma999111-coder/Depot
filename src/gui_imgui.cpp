@@ -92,6 +92,16 @@ struct NewsItem {
 };
 
 static const NewsItem kNews[] = {
+    { "v6.8", "18.10.2026",
+      { "Полный редизайн меню: анимированный сайдбар",
+        "Свои иконки-логотипы для каждой категории игр",
+        "Плавный зум обложки, блик и неоновая рамка карточек",
+        "Шрифты Segoe UI Semibold и Bahnschrift для заголовков" },
+      { "Full menu redesign: animated sidebar",
+        "Custom logo icons for every game category",
+        "Smooth cover zoom, shine and neon card border",
+        "Segoe UI Semibold and Bahnschrift display fonts" },
+      4 },
     { "v6.7", "18.10.2026",
       { "Избранное: сердечко на карточке и вкладка «Избранное»",
         "Звук завершения установки + всплывающие уведомления",
@@ -315,6 +325,7 @@ static constexpr int kNewsCount = (int)(sizeof(kNews) / sizeof(kNews[0]));
 static std::map<std::string, ID3D11ShaderResourceView*> g_covers;
 static std::set<std::string> g_coverFail;
 static std::string g_hoverCard; // карточка под курсором (для зума обложки)
+static std::map<std::string, float> g_cardHov; // плавный прогресс наведения карточки 0..1
 
 static std::string cover_file(const std::string& appid) {
     return tmp_path() + "/ost_covers/" + appid + "_cap.jpg";
@@ -1079,18 +1090,42 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", 19.0f, &cfg, symRanges);
     }
 
-    // big title font
+    // big title font (semibold — выглядит дороже обычного/жирного)
     ImFont* fontTitle = nullptr;
     ImFontConfig cfgTitle;
     cfgTitle.OversampleH = 3;
     cfgTitle.OversampleV = 2;
-    for (const char* fp : { "C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\segoeui.ttf",
-                             "C:\\Windows\\Fonts\\tahoma.ttf" }) {
-        fontTitle = io.Fonts->AddFontFromFileTTF(fp, 30.0f, &cfgTitle, kFontRanges);
+    for (const char* fp : { "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf",
+                             "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\tahoma.ttf" }) {
+        fontTitle = io.Fonts->AddFontFromFileTTF(fp, 29.0f, &cfgTitle, kFontRanges);
         if (fontTitle) break;
     }
     if (!fontTitle) fontTitle = fontMain;
     g_fontTitle = fontTitle;
+
+    // logo wordmark font (Bahnschrift — плотный «техно»-стиль)
+    ImFont* fontLogo = nullptr;
+    ImFontConfig cfgLogo;
+    cfgLogo.OversampleH = 3;
+    cfgLogo.OversampleV = 2;
+    for (const char* fp : { "C:\\Windows\\Fonts\\bahnschrift.ttf", "C:\\Windows\\Fonts\\seguisb.ttf",
+                             "C:\\Windows\\Fonts\\segoeuib.ttf" }) {
+        fontLogo = io.Fonts->AddFontFromFileTTF(fp, 24.0f, &cfgLogo, kFontRanges);
+        if (fontLogo) break;
+    }
+    if (!fontLogo) fontLogo = fontTitle;
+
+    // navigation + section font (semibold)
+    ImFont* fontNav = nullptr;
+    ImFontConfig cfgNav;
+    cfgNav.OversampleH = 3;
+    cfgNav.OversampleV = 2;
+    for (const char* fp : { "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf",
+                             "C:\\Windows\\Fonts\\segoeui.ttf" }) {
+        fontNav = io.Fonts->AddFontFromFileTTF(fp, 18.0f, &cfgNav, kFontRanges);
+        if (fontNav) break;
+    }
+    if (!fontNav) fontNav = fontMain;
 
     // small font for hints (brighter + snapped = readable)
     ImFont* fontSmall = nullptr;
@@ -1181,6 +1216,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         ImU32 accentU32 = ImGui::ColorConvertFloat4ToU32(
             ImVec4(g_accent.x, g_accent.y, g_accent.z, 1.0f));
         ImGui::GetStyle().Colors[ImGuiCol_CheckMark] = g_accent;
+        float ar = g_accent.x, ag = g_accent.y, ab = g_accent.z;
+        float dtA = ImGui::GetIO().DeltaTime;
+        if (dtA <= 0.0f) dtA = 1.0f / 60.0f;
+        if (dtA > 0.05f) dtA = 0.05f;
 
         // ── top neon accent line, бегущий градиент в цвете темы ──
         {
@@ -1231,92 +1270,193 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         float footH = 36.0f;
         float midH = ImGui::GetContentRegionAvail().y - footH;
         if (midH < 200) midH = 200;
-        float navW = 216.0f;
+        float navW = 238.0f;
 
         // ── sidebar ──
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 12));
         ImGui::BeginChild("##nav", ImVec2(navW, midH), true);
         {
             float tm = (float)ImGui::GetTime();
-            float pulse = 0.5f + 0.5f * sinf(tm * 2.5f);
-            ImVec2 cur = ImGui::GetCursorScreenPos();
-            ImVec2 dot(cur.x + 9, cur.y + 13);
             ImDrawList* ndl = ImGui::GetWindowDrawList();
-            ndl->AddCircleFilled(dot, 12.0f, ImGui::ColorConvertFloat4ToU32(
-                ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.10f + 0.12f * pulse)));
-            ndl->AddCircleFilled(dot, 9.0f + pulse * 1.5f, accentU32);
-            ndl->AddCircleFilled(dot, 4.0f,
-                ImGui::ColorConvertFloat4ToU32(ImVec4(0.02f, 0.02f, 0.03f, 1.0f)));
-            ImGui::Dummy(ImVec2(26, 2));
-            ImGui::SameLine();
-            ImGui::PushFont(fontMain);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "Depot");
-            ImGui::PopFont();
-            ImGui::PushFont(fontSmall);
-            ImGui::TextColored(ImVec4(0.45f, 0.47f, 0.58f, 1.0f),
-                tg("Steam-игры в один клик", "One-click Steam games"));
-            ImGui::PopFont();
-            // пилюля версии
-            {
-                const char* ver = DEPOT_VER_TAG;
-                ImVec2 tp = ImGui::GetCursorScreenPos();
-                ImVec2 tsz = ImGui::CalcTextSize(ver);
-                ImVec2 pad(10, 3);
-                ImVec2 b0(tp.x, tp.y + 2), b1(tp.x + tsz.x + pad.x * 2, tp.y + 2 + tsz.y + pad.y * 2);
-                dl->AddRectFilled(b0, b1, accentU32, 9.0f);
-                ImGui::SetCursorScreenPos(ImVec2(b0.x + pad.x, b0.y + pad.y));
-                ImGui::PushFont(fontSmall);
-                ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", ver);
-                ImGui::PopFont();
-            }
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::PushFont(fontSmall);
-            ImGui::TextColored(ImVec4(0.45f, 0.47f, 0.58f, 1.0f), tg("МЕНЮ", "MENU"));
-            ImGui::PopFont();
-            ImGui::Spacing();
-            // компактные кнопки навигации
-            auto nav_btn = [&](const char* label, int tab, bool fav) {
-                bool active = (g_tab == tab) && (g_onlyFav == fav);
-                ImVec2 sz(ImGui::GetContentRegionAvail().x, 40);
-                if (active) {
-                    accent_btn(label, sz, g_accent);
-                    ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-                    g_selX = mn.x - 8; g_selY0 = mn.y; g_selY1 = mx.y;
-                    if (!g_indInit) { g_indY0 = mn.y; g_indH0 = mx.y - mn.y; g_indInit = true; }
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.06f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.10f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.63f, 0.70f, 1.0f));
-                    if (ImGui::Button(label, sz)) {
-                        g_tab = tab;
-                        g_onlyFav = fav;
-                        if (tab == 1) { ensure_covers_thread(); refresh_installed(); }
+            int ar = (int)(g_accent.x * 255), ag = (int)(g_accent.y * 255), ab = (int)(g_accent.z * 255);
+
+            // ── иконки пунктов (рисуем примитивами — всегда чёткие) ──
+            auto nav_icon = [&](ImDrawList* d, int type, ImVec2 c, float s, ImU32 col) {
+                if (type == 0) { // дом
+                    ImVec2 pts[5] = {
+                        ImVec2(c.x, c.y - s * 0.92f),
+                        ImVec2(c.x + s, c.y - s * 0.06f),
+                        ImVec2(c.x + s * 0.62f, c.y + s * 0.86f),
+                        ImVec2(c.x - s * 0.62f, c.y + s * 0.86f),
+                        ImVec2(c.x - s, c.y - s * 0.06f),
+                    };
+                    d->AddConvexPolyFilled(pts, 5, col);
+                } else if (type == 1) { // сетка каталога
+                    float q = s * 0.6f, g = s * 0.17f;
+                    d->AddRectFilled(ImVec2(c.x - g - q, c.y - g - q), ImVec2(c.x - g, c.y - g), col, 2.0f);
+                    d->AddRectFilled(ImVec2(c.x + g, c.y - g - q), ImVec2(c.x + g + q, c.y - g), col, 2.0f);
+                    d->AddRectFilled(ImVec2(c.x - g - q, c.y + g), ImVec2(c.x - g, c.y + g + q), col, 2.0f);
+                    d->AddRectFilled(ImVec2(c.x + g, c.y + g), ImVec2(c.x + g + q, c.y + g + q), col, 2.0f);
+                } else if (type == 2) { // сердце
+                    d->AddCircleFilled(ImVec2(c.x - s * 0.4f, c.y - s * 0.28f), s * 0.5f, col, 16);
+                    d->AddCircleFilled(ImVec2(c.x + s * 0.4f, c.y - s * 0.28f), s * 0.5f, col, 16);
+                    d->AddTriangleFilled(ImVec2(c.x - s * 0.86f, c.y - s * 0.1f),
+                        ImVec2(c.x + s * 0.86f, c.y - s * 0.1f), ImVec2(c.x, c.y + s * 0.85f), col);
+                } else { // ползунки-настройки
+                    float xs[3] = { -s * 0.25f, s * 0.38f, -s * 0.02f };
+                    float ys[3] = { -s * 0.62f, 0.0f, s * 0.62f };
+                    for (int i = 0; i < 3; i++) {
+                        d->AddLine(ImVec2(c.x - s * 0.85f, c.y + ys[i]),
+                            ImVec2(c.x + s * 0.85f, c.y + ys[i]), col, 2.0f);
+                        d->AddCircleFilled(ImVec2(c.x + xs[i], c.y + ys[i]), s * 0.3f, col, 14);
                     }
-                    ImGui::PopStyleColor(4);
                 }
             };
-            char tabGames[64];
-            snprintf(tabGames, sizeof(tabGames), "%s (%d)", tg("Игры", "Games"), kGamesCount);
-            char tabFav[64];
-            snprintf(tabFav, sizeof(tabFav), "%s (%d)", tg("Избранное", "Favorites"), (int)g_favorites.size());
-            nav_btn(tg("Главная", "Home"), 0, false);
-            nav_btn(tabGames, 1, false);
-            nav_btn(tabFav, 1, true);
-            nav_btn(tg("Настройки", "Settings"), 2, false);
-            // скользящий неоновый индикатор
+
+            // ── анимированный логотип-бейдж ──
             {
-                float k = 1.0f - expf(-ImGui::GetIO().DeltaTime * 14.0f);
-                g_indY0 += (g_selY0 - g_indY0) * k;
-                g_indH0 += ((g_selY1 - g_selY0) - g_indH0) * k;
-                if (fabsf(g_indY0 - g_selY0) < 0.5f) {
-                    g_indY0 = g_selY0;
-                    g_indH0 = g_selY1 - g_selY0;
+                ImVec2 lp = ImGui::GetCursorScreenPos();
+                float pulse = 0.5f + 0.5f * sinf(tm * 2.2f);
+                float bs = 44.0f;
+                ImVec2 ctr(lp.x + bs * 0.5f, lp.y + bs * 0.5f);
+                ndl->AddCircleFilled(ctr, bs * 0.72f + pulse * 2.5f, IM_COL32(ar, ag, ab, (int)(24 + 16 * pulse)), 40);
+                ndl->AddRectFilled(lp, ImVec2(lp.x + bs, lp.y + bs), IM_COL32(20, 20, 31, 255), 12.0f);
+                ndl->AddRect(lp, ImVec2(lp.x + bs, lp.y + bs), IM_COL32(ar, ag, ab, 150), 12.0f, 0, 1.5f);
+                // вращающееся двухцветное кольцо
+                ndl->PathArcTo(ctr, bs * 0.5f - 0.5f, tm * 1.3f, tm * 1.3f + 4.7f, 32);
+                ndl->PathStroke(IM_COL32(ar, ag, ab, 210), 0, 2.5f);
+                ndl->PathArcTo(ctr, bs * 0.5f - 0.5f, tm * 1.3f + 3.1416f, tm * 1.3f + 3.1416f + 4.7f, 32);
+                ndl->PathStroke(IM_COL32(255, 255, 255, 70), 0, 2.5f);
+                ndl->AddCircleFilled(ctr, bs * 0.26f, ImGui::ColorConvertFloat4ToU32(g_accent), 28);
+                ndl->AddCircleFilled(ctr, bs * 0.11f, IM_COL32(6, 6, 12, 255), 16);
+                // название + подпись
+                ImFont* fl = fontLogo; ImFont* fsm = fontSmall;
+                ImVec2 dz = fl->CalcTextSizeA(fl->LegacySize, 3.4e38f, 0, "Depot");
+                ndl->AddText(fl, fl->LegacySize, ImVec2(lp.x + bs + 13, lp.y - 2), IM_COL32(255, 255, 255, 255), "Depot");
+                ndl->AddText(fsm, fsm->LegacySize, ImVec2(lp.x + bs + 14, lp.y - 2 + dz.y + 5),
+                    IM_COL32(122, 126, 152, 255), tg("Steam-игры в один клик", "One-click Steam games"));
+                ImGui::Dummy(ImVec2(0, bs + 6));
+            }
+            // пилюля версии
+            {
+                ImFont* fnt = fontSmall;
+                const char* ver = DEPOT_VER_TAG;
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImVec2 tsz = fnt->CalcTextSizeA(fnt->LegacySize, 3.4e38f, 0, ver);
+                ImVec2 b0 = p, b1(p.x + tsz.x + 20, p.y + tsz.y + 6);
+                ndl->AddRectFilled(b0, b1, accentU32, 8.0f);
+                ndl->AddRectFilled(b0, ImVec2(b1.x, b0.y + (b1.y - b0.y) * 0.5f),
+                    IM_COL32(255, 255, 255, 26), 8.0f, ImDrawFlags_RoundCornersTop);
+                ndl->AddText(fnt, fnt->LegacySize, ImVec2(b0.x + 10, b0.y + 3), IM_COL32(255, 255, 255, 255), ver);
+                ImGui::Dummy(ImVec2(0, (b1.y - b0.y) + 12));
+            }
+            // градиентный разделитель с бегущим светом
+            {
+                ImVec2 dp = ImGui::GetCursorScreenPos();
+                float dw = ImGui::GetContentRegionAvail().x;
+                ndl->AddLine(ImVec2(dp.x, dp.y + 1), ImVec2(dp.x + dw, dp.y + 1), IM_COL32(255, 255, 255, 18), 1.0f);
+                float ph = fmodf(tm * 0.25f, 1.0f);
+                float sx = dp.x + dw * ph, gw = 62.0f;
+                ndl->AddRectFilledMultiColor(ImVec2(sx - gw, dp.y + 0.5f), ImVec2(sx, dp.y + 2.5f),
+                    IM_COL32(ar, ag, ab, 0), IM_COL32(ar, ag, ab, 190), IM_COL32(ar, ag, ab, 190), IM_COL32(ar, ag, ab, 0));
+                ndl->AddRectFilledMultiColor(ImVec2(sx, dp.y + 0.5f), ImVec2(sx + gw, dp.y + 2.5f),
+                    IM_COL32(ar, ag, ab, 190), IM_COL32(ar, ag, ab, 0), IM_COL32(ar, ag, ab, 0), IM_COL32(ar, ag, ab, 190));
+                ImGui::Dummy(ImVec2(0, 15));
+            }
+            ImGui::PushFont(fontSmall);
+            ImGui::TextColored(ImVec4(0.42f, 0.44f, 0.56f, 1.0f), "%s", tg("МЕНЮ", "MENU"));
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(0, 7));
+
+            // ── пункты меню с плавными анимациями ──
+            const float ITEM_H = 46.0f, ITEM_GAP = 8.0f;
+            float itemW = ImGui::GetContentRegionAvail().x;
+            struct NavRow { int icon; const char* ru; const char* en; int tab; bool fav; };
+            static const NavRow navs[4] = {
+                { 0, "Главная", "Home", 0, false },
+                { 1, "Игры", "Games", 1, false },
+                { 2, "Избранное", "Favorites", 1, true },
+                { 3, "Настройки", "Settings", 2, false },
+            };
+            char navLbl[4][80];
+            int activeIdx = 0;
+            for (int i = 0; i < 4; i++) {
+                if (navs[i].icon == 1) snprintf(navLbl[i], 80, "%s (%d)", tg(navs[i].ru, navs[i].en), kGamesCount);
+                else if (navs[i].icon == 2) snprintf(navLbl[i], 80, "%s (%d)", tg(navs[i].ru, navs[i].en), (int)g_favorites.size());
+                else snprintf(navLbl[i], 80, "%s", tg(navs[i].ru, navs[i].en));
+                if ((g_tab == navs[i].tab) && (g_onlyFav == navs[i].fav)) activeIdx = i;
+            }
+            ImVec2 itemPos[4];
+            int hovered = -1;
+            for (int i = 0; i < 4; i++) {
+                ImGui::PushID(2000 + i);
+                itemPos[i] = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##navrow", ImVec2(itemW, ITEM_H));
+                if (ImGui::IsItemHovered()) hovered = i;
+                if (ImGui::IsItemClicked()) {
+                    g_tab = navs[i].tab;
+                    g_onlyFav = navs[i].fav;
+                    if (navs[i].tab == 1) { ensure_covers_thread(); refresh_installed(); }
                 }
-                dl->AddLine(ImVec2(g_selX, g_indY0 + 9), ImVec2(g_selX, g_indY0 + g_indH0 - 9),
-                    accentU32, 3.0f);
+                ImGui::PopID();
+                if (i < 3) ImGui::Dummy(ImVec2(0, ITEM_GAP));
+            }
+            // анимация: скользящая подсветка + акцентная пилюля + «подпрыгивание» иконки
+            static float hovY = 0, hovA = 0, actY = 0, actH = ITEM_H;
+            static bool actInit = false;
+            static int lastActive = -1;
+            static float actPop = 0.0f;
+            float ak = 1.0f - expf(-ImGui::GetIO().DeltaTime * 16.0f);
+            if (hovered >= 0) { hovY += (itemPos[hovered].y - hovY) * ak; hovA += (1.0f - hovA) * ak; }
+            else hovA += (0.0f - hovA) * ak;
+            if (!actInit) { actY = itemPos[activeIdx].y; actInit = true; }
+            actY += (itemPos[activeIdx].y - actY) * ak;
+            actH += (ITEM_H - actH) * ak;
+            if (lastActive != activeIdx) { lastActive = activeIdx; actPop = 1.0f; }
+            actPop *= expf(-ImGui::GetIO().DeltaTime * 5.5f);
+            float x0 = itemPos[0].x, x1 = x0 + itemW;
+            // светлая подсветка под курсором
+            if (hovA > 0.01f)
+                ndl->AddRectFilled(ImVec2(x0, hovY), ImVec2(x1, hovY + ITEM_H),
+                    IM_COL32(255, 255, 255, (int)(20 * hovA)), 11.0f);
+            // акцентная пилюля активного пункта
+            {
+                ImVec2 a0(x0, actY), a1(x1, actY + actH);
+                ndl->AddRectFilled(ImVec2(a0.x - 3, a0.y - 3), ImVec2(a1.x + 3, a1.y + 3),
+                    IM_COL32(ar, ag, ab, 60), 14.0f);
+                ndl->AddRectFilled(a0, a1, IM_COL32(ar, ag, ab, 255), 11.0f);
+                ndl->AddRectFilled(a0, ImVec2(a1.x, a0.y + actH * 0.5f),
+                    IM_COL32(255, 255, 255, 22), 11.0f, ImDrawFlags_RoundCornersTop);
+                float ph = fmodf(tm * 0.35f, 1.0f);
+                float sx = a0.x + (a1.x - a0.x) * ph;
+                ndl->PushClipRect(a0, a1, true);
+                ndl->AddRectFilled(ImVec2(sx - 34, a0.y), ImVec2(sx + 34, a1.y), IM_COL32(255, 255, 255, 22), 0.0f);
+                ndl->PopClipRect();
+                ndl->AddRectFilled(ImVec2(a0.x + 7, a0.y + 13), ImVec2(a0.x + 10, a1.y - 13),
+                    IM_COL32(255, 255, 255, 225), 2.0f);
+            }
+            // иконки + подписи
+            for (int i = 0; i < 4; i++) {
+                ImVec2 p = itemPos[i];
+                bool act = (i == activeIdx);
+                bool hov = (i == hovered);
+                float scale = (act ? 1.0f + 0.28f * actPop : 1.0f);
+                ImVec2 ic(p.x + 27, p.y + ITEM_H * 0.5f);
+                ImU32 icol = act ? IM_COL32(255, 255, 255, 255)
+                    : hov ? IM_COL32(238, 238, 248, 255) : IM_COL32(148, 150, 168, 255);
+                nav_icon(ndl, navs[i].icon, ic, 10.0f * scale, icol);
+                ImVec4 tcol = act ? ImVec4(1, 1, 1, 1)
+                    : hov ? ImVec4(0.93f, 0.94f, 0.98f, 1) : ImVec4(0.62f, 0.63f, 0.70f, 1);
+                ImFont* fnv = fontNav;
+                ImVec2 tsz = fnv->CalcTextSizeA(fnv->LegacySize, 3.4e38f, 0, navLbl[i]);
+                ndl->AddText(fnv, fnv->LegacySize, ImVec2(p.x + 52, p.y + (ITEM_H - tsz.y) * 0.5f),
+                    ImGui::ColorConvertFloat4ToU32(tcol), navLbl[i]);
+                // маленький индикатор-шеврон у активного пункта
+                if (act) {
+                    float cx = x1 - 18, cy = p.y + ITEM_H * 0.5f;
+                    ndl->AddTriangleFilled(ImVec2(cx - 3, cy - 4.5f), ImVec2(cx - 3, cy + 4.5f),
+                        ImVec2(cx + 3.5f, cy), IM_COL32(255, 255, 255, 200));
+                }
             }
             // путь Steam + статус + прогресс + язык внизу сайдбара
             ImGui::SetCursorPosY(midH - 146);
@@ -1740,36 +1880,103 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 tg("Поиск игры или AppID...", "Search game or AppID..."),
                 g_searchBuf, sizeof(g_searchBuf), ImGuiInputTextFlags_EscapeClearsAll);
 
-            // категории-чипсы со счётчиками (два ряда, без скроллбара, точный перенос)
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 2));
-            ImGui::BeginChild("##cats", ImVec2(0, 68), false, ImGuiWindowFlags_NoScrollbar);
+            // ── категории: чипсы с рисованными иконками-«логотипами» ──
+            auto cat_icon = [&](ImDrawList* d, int t, ImVec2 c, float s, ImU32 col, ImU32 cut) {
+                if (t == 0) { // все — сетка
+                    float q = s * 0.56f, g = s * 0.16f;
+                    d->AddRectFilled(ImVec2(c.x - g - q, c.y - g - q), ImVec2(c.x - g, c.y - g), col, 2.0f);
+                    d->AddRectFilled(ImVec2(c.x + g, c.y - g - q), ImVec2(c.x + g + q, c.y - g), col, 2.0f);
+                    d->AddRectFilled(ImVec2(c.x - g - q, c.y + g), ImVec2(c.x - g, c.y + g + q), col, 2.0f);
+                    d->AddRectFilled(ImVec2(c.x + g, c.y + g), ImVec2(c.x + g + q, c.y + g + q), col, 2.0f);
+                } else if (t == 1) { // экшен — молния
+                    ImVec2 p[7] = {
+                        ImVec2(c.x + s * 0.15f, c.y - s * 0.95f), ImVec2(c.x - s * 0.55f, c.y + s * 0.08f),
+                        ImVec2(c.x - s * 0.10f, c.y + s * 0.08f), ImVec2(c.x - s * 0.25f, c.y + s * 0.95f),
+                        ImVec2(c.x + s * 0.55f, c.y - s * 0.12f), ImVec2(c.x + s * 0.08f, c.y - s * 0.12f),
+                        ImVec2(c.x + s * 0.15f, c.y - s * 0.95f) };
+                    d->AddConcavePolyFilled(p, 7, col);
+                } else if (t == 2) { // шутеры — прицел
+                    d->AddCircle(c, s * 0.7f, col, 20, 1.8f);
+                    d->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x - s * 0.35f, c.y), col, 1.8f);
+                    d->AddLine(ImVec2(c.x + s * 0.35f, c.y), ImVec2(c.x + s, c.y), col, 1.8f);
+                    d->AddLine(ImVec2(c.x, c.y - s), ImVec2(c.x, c.y - s * 0.35f), col, 1.8f);
+                    d->AddLine(ImVec2(c.x, c.y + s * 0.35f), ImVec2(c.x, c.y + s), col, 1.8f);
+                    d->AddCircleFilled(c, s * 0.16f, col, 10);
+                } else if (t == 3) { // RPG — щит
+                    ImVec2 p[5] = {
+                        ImVec2(c.x, c.y - s * 0.9f), ImVec2(c.x + s * 0.8f, c.y - s * 0.5f),
+                        ImVec2(c.x + s * 0.72f, c.y + s * 0.35f), ImVec2(c.x, c.y + s * 0.92f),
+                        ImVec2(c.x - s * 0.72f, c.y + s * 0.35f) };
+                    d->AddConcavePolyFilled(p, 5, col);
+                } else if (t == 4) { // выживание — ёлка
+                    d->AddTriangleFilled(ImVec2(c.x, c.y - s * 0.95f), ImVec2(c.x + s * 0.6f, c.y - s * 0.15f), ImVec2(c.x - s * 0.6f, c.y - s * 0.15f), col);
+                    d->AddTriangleFilled(ImVec2(c.x, c.y - s * 0.45f), ImVec2(c.x + s * 0.8f, c.y + s * 0.55f), ImVec2(c.x - s * 0.8f, c.y + s * 0.55f), col);
+                    d->AddRectFilled(ImVec2(c.x - s * 0.15f, c.y + s * 0.55f), ImVec2(c.x + s * 0.15f, c.y + s * 0.95f), col, 1.0f);
+                } else if (t == 5) { // стратегия — флаг
+                    d->AddLine(ImVec2(c.x - s * 0.6f, c.y - s * 0.95f), ImVec2(c.x - s * 0.6f, c.y + s * 0.95f), col, 2.0f);
+                    d->AddTriangleFilled(ImVec2(c.x - s * 0.55f, c.y - s * 0.9f), ImVec2(c.x + s * 0.8f, c.y - s * 0.5f), ImVec2(c.x - s * 0.55f, c.y - s * 0.1f), col);
+                } else if (t == 6) { // хоррор — полумесяц
+                    d->AddCircleFilled(c, s * 0.85f, col, 24);
+                    d->AddCircleFilled(ImVec2(c.x + s * 0.45f, c.y - s * 0.3f), s * 0.7f, cut, 24);
+                } else if (t == 7) { // инди — звезда
+                    ImVec2 p[10];
+                    for (int k = 0; k < 10; k++) {
+                        float ang = -1.5708f + k * 0.6283f;
+                        float rr = (k & 1) ? s * 0.42f : s * 0.95f;
+                        p[k] = ImVec2(c.x + cosf(ang) * rr, c.y + sinf(ang) * rr);
+                    }
+                    d->AddConcavePolyFilled(p, 10, col);
+                } else { // онлайн — глобус
+                    d->AddCircle(c, s * 0.85f, col, 24, 1.8f);
+                    d->AddLine(ImVec2(c.x - s * 0.85f, c.y), ImVec2(c.x + s * 0.85f, c.y), col, 1.5f);
+                    d->AddEllipse(c, ImVec2(s * 0.4f, s * 0.85f), col, 0.0f, 20, 1.5f);
+                }
+            };
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 4));
+            ImGui::BeginChild("##cats", ImVec2(0, 76), false, ImGuiWindowFlags_NoScrollbar);
             {
-                static char chipLbl[16][64];
+                static char chipLbl[16][80];
+                float availW = ImGui::GetContentRegionAvail().x;
+                float cgap = 9.0f;
+                const float chipH = 32.0f;
+                float x = 0.0f;
+                ImFont* fnv = fontNav;
                 for (int ci = 0; ci < kCatsCount; ci++) {
                     int cnt = 0;
                     for (int gi = 0; gi < kGamesCount; gi++)
                         if (ci == 0 || !strcmp(kGames[gi].cat, kCats[ci].key)) cnt++;
-                    snprintf(chipLbl[ci], sizeof(chipLbl[ci]), "%s (%d)",
-                        tg(kCats[ci].ru, kCats[ci].en), cnt);
-                }
-                float availW = ImGui::GetContentRegionAvail().x;
-                float cgap = 10.0f;
-                float cpadX = ImGui::GetStyle().FramePadding.x * 2.0f;
-                float chipW[16];
-                for (int ci = 0; ci < kCatsCount; ci++)
-                    chipW[ci] = ImGui::CalcTextSize(chipLbl[ci]).x + cpadX;
-                float x = 0.0f;
-                for (int ci = 0; ci < kCatsCount; ci++) {
+                    snprintf(chipLbl[ci], sizeof(chipLbl[ci]), "%s (%d)", tg(kCats[ci].ru, kCats[ci].en), cnt);
+                    float tw = fnv->CalcTextSizeA(fnv->LegacySize, 3.4e38f, 0, chipLbl[ci]).x;
+                    float iconW = 20.0f;
+                    float chipW = 12.0f + iconW + 7.0f + tw + 14.0f;
                     if (ci > 0) {
-                        if (x + cgap + chipW[ci] > availW + 1.0f) x = 0.0f;
+                        if (x + cgap + chipW > availW + 1.0f) x = 0.0f;
                         else { ImGui::SameLine(0, cgap); x += cgap; }
                     }
-                    if (ci == g_catSel) {
-                        accent_btn(chipLbl[ci], ImVec2(0, 28), g_accent);
-                    } else if (ImGui::Button(chipLbl[ci], ImVec2(0, 28))) {
-                        g_catSel = ci;
-                    }
-                    x += chipW[ci];
+                    ImGui::PushID(3000 + ci);
+                    ImVec2 p0 = ImGui::GetCursorScreenPos();
+                    ImGui::InvisibleButton("##chip", ImVec2(chipW, chipH));
+                    bool sel = (ci == g_catSel);
+                    bool hov = ImGui::IsItemHovered();
+                    if (ImGui::IsItemClicked()) g_catSel = ci;
+                    ImDrawList* d = ImGui::GetWindowDrawList();
+                    float rr = chipH * 0.5f;
+                    ImU32 bg, cut;
+                    if (sel) { bg = accentU32; cut = accentU32; }
+                    else if (hov) { bg = IM_COL32(40, 40, 58, 255); cut = bg; }
+                    else { bg = IM_COL32(22, 22, 32, 255); cut = bg; }
+                    d->AddRectFilled(p0, ImVec2(p0.x + chipW, p0.y + chipH), bg, rr);
+                    if (sel) d->AddRect(p0, ImVec2(p0.x + chipW, p0.y + chipH), IM_COL32(255, 255, 255, 70), rr, 0, 1.5f);
+                    else if (hov) d->AddRect(p0, ImVec2(p0.x + chipW, p0.y + chipH), IM_COL32(255, 255, 255, 28), rr, 0, 1.0f);
+                    ImU32 icol = sel ? IM_COL32(255, 255, 255, 255)
+                        : IM_COL32((int)(g_accent.x * 255), (int)(g_accent.y * 255), (int)(g_accent.z * 255), 235);
+                    cat_icon(d, ci, ImVec2(p0.x + 12 + iconW * 0.5f, p0.y + chipH * 0.5f), 8.5f, icol, cut);
+                    ImU32 tcol = sel ? IM_COL32(255, 255, 255, 255)
+                        : (hov ? IM_COL32(228, 229, 238, 255) : IM_COL32(178, 180, 196, 255));
+                    ImVec2 tsz = fnv->CalcTextSizeA(fnv->LegacySize, 3.4e38f, 0, chipLbl[ci]);
+                    d->AddText(fnv, fnv->LegacySize, ImVec2(p0.x + 12 + iconW + 7, p0.y + (chipH - tsz.y) * 0.5f), tcol, chipLbl[ci]);
+                    ImGui::PopID();
+                    x += chipW;
                 }
             }
             ImGui::EndChild();
@@ -1893,7 +2100,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", nm.c_str());
                         ImGui::BeginDisabled(g_busy.load());
                         bool inst = g_installed.count(ge->appid) > 0;
-                        if (accent_btn(inst ? tg("✓ Установлена", "✓ Installed") : tg("▼ Установить", "▼ Install"),
+                        if (accent_btn(inst ? tg("● Установлена", "● Installed") : tg("▼ Установить", "▼ Install"),
                                 ImVec2(fimgW, 28), inst ? ImVec4(0.10f, 0.42f, 0.24f, 1.0f) : ImVec4(0.05f, 0.55f, 0.30f, 1.0f))) {
                             refresh_status();
                             refresh_installed();
@@ -1934,21 +2141,26 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         const GameEntry* ge = list[i];
                         if (cc_) ImGui::SameLine(0, gap);
                         ImGui::PushID((int)i);
+                float& hov = g_cardHov[ge->appid];
                 {
                     ImVec2 sp = ImGui::GetCursorScreenPos();
+                    float e = hov * 3.0f;
                     ImGui::GetWindowDrawList()->AddRectFilled(
-                        ImVec2(sp.x, sp.y + 5), ImVec2(sp.x + cardW + 5, sp.y + imgH + 109),
-                        IM_COL32(0, 0, 0, 90), 10.0f);
+                        ImVec2(sp.x - e, sp.y + 5 - e), ImVec2(sp.x + cardW + 5 + e, sp.y + imgH + 109 + e),
+                        IM_COL32(0, 0, 0, (int)(90 + 60 * hov)), 10.0f);
                 }
                 ImGui::BeginChild("##card", ImVec2(cardW, imgH + 104), true);
                 auto it = g_covers.find(ge->appid);
                 if (it != g_covers.end() && it->second) {
-                    if (g_hoverCard == ge->appid) {
-                        ImVec2 ic = ImGui::GetCursorScreenPos();
-                        ImGui::SetCursorScreenPos(ImVec2(ic.x - 6, ic.y - 3));
-                        ImGui::Image((ImTextureID)it->second, ImVec2(imgW + 12, imgH + 7));
-                    } else {
-                        ImGui::Image((ImTextureID)it->second, ImVec2(imgW, imgH));
+                    ImVec2 ic = ImGui::GetCursorScreenPos();
+                    ImGui::Image((ImTextureID)it->second, ImVec2(imgW, imgH));
+                    if (hov > 0.01f) {
+                        ImDrawList* zdl = ImGui::GetWindowDrawList();
+                        float z = 1.0f + 0.06f * hov;
+                        ImVec2 zm(ic.x + imgW * 0.5f, ic.y + imgH * 0.5f);
+                        zdl->AddImage((ImTextureID)it->second,
+                            ImVec2(zm.x - imgW * 0.5f * z, zm.y - imgH * 0.5f * z),
+                            ImVec2(zm.x + imgW * 0.5f * z, zm.y + imgH * 0.5f * z));
                     }
                     // затемнение низа + бейдж категории поверх обложки
                     ImVec2 imn = ImGui::GetItemRectMin(), imx = ImGui::GetItemRectMax();
@@ -1968,15 +2180,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         IM_COL32(5, 5, 10, 170), 5.0f);
                     ImGui::SetCursorScreenPos(ImVec2(pp.x + 6, pp.y + 3));
                     ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", cname);
-                    // зелёный бейдж «установлена» (сдвинут левее под сердечко)
+                    // зелёный бейдж «установлена» — галочка рисуется линиями (надёжнее глифов)
                     if (g_installed.count(ge->appid)) {
-                        const char* mk = "✓";
-                        ImVec2 mz = ImGui::CalcTextSize(mk);
-                        ImVec2 mp(imx.x - mz.x - 54, imn.y + 6);
-                        cdl->AddRectFilled(mp, ImVec2(mp.x + mz.x + 12, mp.y + mz.y + 6),
-                            IM_COL32(10, 140, 70, 200), 5.0f);
-                        ImGui::SetCursorScreenPos(ImVec2(mp.x + 6, mp.y + 3));
-                        ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", mk);
+                        float bsz = 22.0f;
+                        ImVec2 mp(imx.x - bsz - 40, imn.y + 6);
+                        cdl->AddRectFilled(mp, ImVec2(mp.x + bsz, mp.y + bsz), IM_COL32(10, 150, 74, 215), 5.0f);
+                        ImVec2 cc(mp.x + bsz * 0.5f, mp.y + bsz * 0.5f);
+                        cdl->AddLine(ImVec2(cc.x - 5.0f, cc.y + 0.5f), ImVec2(cc.x - 1.5f, cc.y + 4.0f), IM_COL32(255, 255, 255, 255), 2.4f);
+                        cdl->AddLine(ImVec2(cc.x - 1.5f, cc.y + 4.0f), ImVec2(cc.x + 5.5f, cc.y - 4.0f), IM_COL32(255, 255, 255, 255), 2.4f);
                     }
                     // сердечко-избранное справа сверху
                     {
@@ -2002,6 +2213,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                                                         : tg("В избранное", "Add to favorites"));
                         }
                     }
+                    if (hov > 0.01f) {
+                        cdl->PushClipRect(ImVec2(ic.x, ic.y), ImVec2(ic.x + imgW, ic.y + imgH), true);
+                        float shx = ic.x + imgW * (hov * 1.5f - 0.35f);
+                        cdl->AddLine(ImVec2(shx, ic.y - 24), ImVec2(shx - 46, ic.y + imgH + 24),
+                            IM_COL32(255, 255, 255, (int)(46 * hov)), 24.0f);
+                        cdl->PopClipRect();
+                    }
                     ImGui::SetCursorPos(saved);
                 } else {
                     // скелетон с пробегающим бликом
@@ -2024,7 +2242,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), "AppID %s", ge->appid);
                 ImGui::BeginDisabled(g_busy.load());
                 bool inst = g_installed.count(ge->appid) > 0;
-                const char* blbl = inst ? tg("✓ Установлена", "✓ Installed")
+                const char* blbl = inst ? tg("● Установлена", "● Installed")
                                         : tg("▼ Установить", "▼ Install");
                 ImVec4 bcol = inst ? ImVec4(0.10f, 0.42f, 0.24f, 1.0f)
                                    : ImVec4(0.05f, 0.55f, 0.30f, 1.0f);
@@ -2035,14 +2253,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 }
                 ImGui::EndDisabled();
                 ImGui::EndChild();
-                // неоновая рамка + зум при наведении на карточку
-                if (ImGui::IsItemHovered()) {
-                    g_hoverCard = ge->appid;
+                // неоновая рамка + плавная анимация наведения (eased)
+                bool cardH = ImGui::IsItemHovered();
+                if (cardH) g_hoverCard = ge->appid;
+                else if (g_hoverCard == ge->appid) g_hoverCard.clear();
+                hov += ((cardH ? 1.0f : 0.0f) - hov) * (1.0f - powf(0.001f, dtA));
+                if (hov > 0.995f) hov = 1.0f; else if (hov < 0.005f) hov = 0.0f;
+                if (hov > 0.01f) {
                     ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-                    ImGui::GetWindowDrawList()->AddRect(mn, mx,
-                        accentU32, 10.0f, 0, 2.0f);
-                } else if (g_hoverCard == ge->appid) {
-                    g_hoverCard.clear();
+                    ImDrawList* gdl = ImGui::GetWindowDrawList();
+                    gdl->AddRect(mn, mx, accentU32, 10.0f, 0, 2.0f + 0.8f * hov);
+                    gdl->AddRect(ImVec2(mn.x - 1, mn.y - 1), ImVec2(mx.x + 1, mx.y + 1),
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(ar, ag, ab, 0.28f * hov)), 11.0f, 0, 3.5f);
                 }
                 ImGui::PopID();
                     }
@@ -2092,7 +2314,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         odl->AddCircleFilled(oc, 72.0f - (float)gi * 9.0f,
                             IM_COL32(or_, og, ob, 6 + gi * 2));
                 }
-                ImGui::PushFont(fontTitle);
+                ImGui::PushFont(fontLogo);
                 ImGui::TextColored(ImVec4(1, 1, 1, 1), "Depot");
                 ImGui::PopFont();
                 ImGui::PushFont(fontSmall);
@@ -2248,9 +2470,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.25f)));
                 bdl->AddCircleFilled(ImVec2(cx, cy - 70), 22.0f, acb);
                 bdl->AddCircleFilled(ImVec2(cx, cy - 70), 9.0f, IM_COL32(4, 4, 6, 255));
-                ImGui::PushFont(fontTitle);
+                ImGui::PushFont(fontLogo);
                 ImVec2 ttz = ImGui::CalcTextSize("Depot");
-                ImGui::SetCursorScreenPos(ImVec2(cx - ttz.x * 0.5f, cy - 20));
+                ImGui::SetCursorScreenPos(ImVec2(cx - ttz.x * 0.5f, cy - 24));
                 ImGui::TextColored(ImVec4(1, 1, 1, 1), "Depot");
                 ImGui::PopFont();
                 ImGui::PushFont(fontSmall);
@@ -2361,9 +2583,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 const char* s2 = tg("Установка", "Install");
                 const char* s3 = tg("Готово", "Done");
                 char l1[64], l2[64], l3[64];
-                snprintf(l1, sizeof(l1), "%s %s", done ? "✓" : "•", s1);
-                snprintf(l2, sizeof(l2), "%s %s", done ? "✓" : "○", s2);
-                snprintf(l3, sizeof(l3), "%s %s", done ? "✓" : "○", s3);
+                snprintf(l1, sizeof(l1), "%s %s", done ? "●" : "○", s1);
+                snprintf(l2, sizeof(l2), "%s %s", done ? "●" : "○", s2);
+                snprintf(l3, sizeof(l3), "%s %s", done ? "●" : "○", s3);
                 float tgap = 18.0f;
                 float tw = ImGui::CalcTextSize(l1).x + ImGui::CalcTextSize(l2).x
                     + ImGui::CalcTextSize(l3).x + tgap * 2;
