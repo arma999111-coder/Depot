@@ -1,12 +1,14 @@
-// common.h — shared types, colors, paths
+﻿// common.h — shared types, colors, paths
 #pragma once
 #include <windows.h>
 #include <tlhelp32.h>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <cctype>
 #include <string>
 #include <vector>
+#include <set>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -32,8 +34,8 @@ inline const char* tr(const char* ru, const char* en) { return g_lang ? en : ru;
 #define W 52
 
 // версия приложения (для проверки обновлений на GitHub)
-#define DEPOT_VER "6.8"
-#define DEPOT_VER_TAG "v6.8"
+#define DEPOT_VER "6.9"
+#define DEPOT_VER_TAG "v6.9"
 
 // steam paths
 struct Paths {

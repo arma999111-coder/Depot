@@ -7,11 +7,12 @@
 // ── setup helpers ──
 static void ensure_base(Paths& p, bool with_dll) {
     if (with_dll) {
-        bx_top(tr("DLL", "DLL"));
+        bx_top(tr("BST FIX (DLL)", "BST FIX (DLL)"));
         if (dlls_ok(p.steam)) ok(tr("уже установлены", "already installed"));
         else {
-            int n = install_dlls(p.steam);
-            ok("dll: %d/3", n);
+            info(tr("тихо качаю BetterSteamTools...", "silently downloading BetterSteamTools..."));
+            int n = install_bst(p.steam);
+            ok("bst-fix: %d/1", n);
         }
         bar("dll", 30);
         bx_bot();

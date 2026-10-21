@@ -56,6 +56,12 @@ static const GameEntry* find_game(const std::string& appid) {
 }
 static int g_lang_gui = 0;
 static const char* tg(const char* ru, const char* en) { return g_lang_gui ? en : ru; }
+static const char* ru_games_word(int n) {
+    int m10 = n % 10, m100 = n % 100;
+    if (m10 == 1 && m100 != 11) return "игра";
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return "игры";
+    return "игр";
+}
 
 static Paths g_paths;
 static bool g_has = false, g_dok = false, g_pok = false;
@@ -92,6 +98,20 @@ struct NewsItem {
 };
 
 static const NewsItem kNews[] = {
+    { "v6.9", "18.10.2026",
+      { "Фон на выбор: пыль, снег, звёзды и аврора",
+        "Мягкое свечение, следующее за курсором",
+        "Параллакс, мерцание и падающие звёзды",
+        "Гипергамия — схема на фоне",
+        "Живое меню: искра по вкладке, пылинки и счётчики",
+        "Каталог: +44 свежих релиза 2025–2026" },
+      { "Background picker: dust, snow, stars, aurora and hypergamy",
+        "Soft glow that follows the cursor",
+        "Parallax, twinkling and shooting stars",
+        "Hypergamy — a chart on the background",
+        "Living menu: a spark along the tab, motes and count-up stats",
+        "Catalog: +44 fresh 2025–2026 releases" },
+      6 },
     { "v6.8", "18.10.2026",
       { "Полный редизайн меню: анимированный сайдбар",
         "Свои иконки-логотипы для каждой категории игр",
@@ -323,6 +343,9 @@ static constexpr int kNewsCount = (int)(sizeof(kNews) / sizeof(kNews[0]));
 
 // ── covers (Steam CDN header.jpg) ──
 static std::map<std::string, ID3D11ShaderResourceView*> g_covers;
+static std::map<std::string, float> g_coverAspect;
+static ID3D11ShaderResourceView* g_hyperTex = nullptr;
+static bool g_hyperTried = false;
 static std::set<std::string> g_coverFail;
 static std::string g_hoverCard; // карточка под курсором (для зума обложки)
 static std::map<std::string, float> g_cardHov; // плавный прогресс наведения карточки 0..1
@@ -342,15 +365,20 @@ static bool dl_quiet_h(HINTERNET hI, const std::string& url, const std::string& 
             char buf[16384];
             DWORD rd = 0;
             size_t total = 0;
+            unsigned char sig[3] = { 0, 0, 0 };
+            size_t sigN = 0;
             BOOL r = TRUE;
             ok = true;
             while ((r = InternetReadFile(hU, buf, sizeof(buf), &rd)) && rd) {
+                for (DWORD bi = 0; bi < rd && sigN < 3; bi++)
+                    sig[sigN++] = (unsigned char)buf[bi];
                 if (fwrite(buf, 1, rd, f) != rd) { ok = false; break; }
                 total += rd;
             }
             if (!r) ok = false;
             fclose(f);
-            if (!ok || total < 2048) {
+            // принимаем только настоящий JPEG (404-страницы CDN весят >2 КБ)
+            if (!ok || total < 2048 || sigN < 3 || sig[0] != 0xFF || sig[1] != 0xD8 || sig[2] != 0xFF) {
                 DeleteFileW(widen(out).c_str());
                 ok = false;
             }
@@ -358,6 +386,55 @@ static bool dl_quiet_h(HINTERNET hI, const std::string& url, const std::string& 
         InternetCloseHandle(hU);
     }
     return ok;
+}
+
+static std::mutex g_apiMutex;
+
+// достаём канонический header_image из Steam API (новые игры не отдают legacy-пути)
+static bool dl_canonical_header(HINTERNET hI, const std::string& appid, std::string& urlOut) {
+    std::string api = "https://store.steampowered.com/api/appdetails?appids=" + appid +
+        "&filters=basic&cc=us&l=english";
+    HINTERNET hU = InternetOpenUrlA(hI, api.c_str(), nullptr, 0,
+        INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
+    if (!hU) return false;
+    std::string body;
+    char buf[8192];
+    DWORD rd = 0;
+    BOOL r = TRUE;
+    while ((r = InternetReadFile(hU, buf, sizeof(buf), &rd)) && rd) {
+        body.append(buf, rd);
+        if (body.size() > 1024 * 1024) break;
+    }
+    InternetCloseHandle(hU);
+    if (body.empty()) return false;
+    const std::string key = "\"header_image\":\"";
+    size_t p = body.find(key);
+    if (p == std::string::npos) return false;
+    p += key.size();
+    size_t e = body.find('"', p);
+    if (e == std::string::npos || e <= p) return false;
+    std::string u = body.substr(p, e - p);
+    std::string clean;
+    clean.reserve(u.size());
+    for (size_t i = 0; i < u.size(); i++) {
+        if (u[i] != '\\' || i + 1 >= u.size()) { clean += u[i]; continue; }
+        char c = u[i + 1];
+        if (c == '/') { clean += '/'; i++; }
+        else if (c == 'u' && i + 5 < u.size()) {
+            int v = 0;
+            for (int k = 0; k < 4; k++) {
+                char h = u[i + 2 + k];
+                v <<= 4;
+                v += (h >= '0' && h <= '9') ? h - '0'
+                    : (h >= 'a' && h <= 'f') ? h - 'a' + 10 : h - 'A' + 10;
+            }
+            clean += (char)v;
+            i += 5;
+        } else { clean += c; i++; }
+    }
+    if (clean.rfind("https://", 0) != 0) return false;
+    urlOut = clean;
+    return true;
 }
 
 static bool g_coverDlStarted = false;
@@ -373,43 +450,74 @@ static void ensure_covers_thread() {
             DeleteFileW(widen(dir + "/" + dead + "_cap.jpg").c_str());
             DeleteFileW(widen(dir + "/" + dead + ".jpg").c_str());
         }
-        // пул из 6 worker'ов — качаем параллельно, в разы быстрее
-        std::atomic<int> next{0};
-        auto worker = [&] {
-            HINTERNET hI = InternetOpenA("Depot/" DEPOT_VER, INTERNET_OPEN_TYPE_PRECONFIG,
-                nullptr, nullptr, 0);
-            if (!hI) return;
-            DWORD to = 15000;
-            InternetSetOptionA(hI, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
-            InternetSetOptionA(hI, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
-            for (;;) {
-                int i = next.fetch_add(1);
-                if (i >= kGamesCount) break;
-                std::string appid = kGames[i].appid;
-                std::string out = cover_file(appid);
-                // чистим старый мелкий кэш header.jpg
-                DeleteFileW(widen(dir + "/" + appid + ".jpg").c_str());
-                std::error_code ec2;
-                auto sz = fs::file_size(widen(out), ec2);
-                if (!ec2 && sz > 2048) continue; // уже скачана
-                std::string url = std::string("https://cdn.cloudflare.steamstatic.com/steam/apps/")
-                    + appid + "/capsule_616x353.jpg";
-                std::string tmp = out + ".part";
-                if (dl_quiet_h(hI, url, tmp))
-                    MoveFileW(widen(tmp).c_str(), widen(out).c_str());
-            }
-            InternetCloseHandle(hI);
-        };
-        const int N = 6;
-        std::vector<std::thread> pool;
-        for (int k = 0; k < N; k++) pool.emplace_back(worker);
-        for (auto& t : pool) t.join();
+        // пул из 6 worker'ов; второй проход — повтор для сетевых сбоев
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass) Sleep(900);
+            std::atomic<int> next{0};
+            auto worker = [&] {
+                HINTERNET hI = InternetOpenA("Depot/" DEPOT_VER, INTERNET_OPEN_TYPE_PRECONFIG,
+                    nullptr, nullptr, 0);
+                if (!hI) return;
+                DWORD to = 15000;
+                InternetSetOptionA(hI, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
+                InternetSetOptionA(hI, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
+                for (;;) {
+                    int i = next.fetch_add(1);
+                    if (i >= kGamesCount) break;
+                    std::string appid = kGames[i].appid;
+                    std::string out = cover_file(appid);
+                    // чистим старый мелкий кэш header.jpg
+                    DeleteFileW(widen(dir + "/" + appid + ".jpg").c_str());
+                    std::error_code ec2;
+                    auto sz = fs::file_size(widen(out), ec2);
+                    bool cached = false;
+                    if (!ec2 && sz > 2048) {
+                        // раньше CDN мог отдать 404-страницу — проверяем JPEG-сигнатуру
+                        FILE* cf = nullptr;
+                        unsigned char sg[3] = { 0, 0, 0 };
+                        if (_wfopen_s(&cf, widen(out).c_str(), L"rb") == 0 && cf) {
+                            size_t n = fread(sg, 1, 3, cf);
+                            fclose(cf);
+                            cached = (n == 3 && sg[0] == 0xFF && sg[1] == 0xD8 && sg[2] == 0xFF);
+                        }
+                        if (!cached) DeleteFileW(widen(out).c_str());
+                    }
+                    if (cached) continue;
+                    std::string tmp = out + ".part";
+                    std::string url = std::string("https://cdn.cloudflare.steamstatic.com/steam/apps/")
+                        + appid + "/capsule_616x353.jpg";
+                    bool got = dl_quiet_h(hI, url, tmp);
+                    if (!got) {
+                        url = std::string("https://cdn.cloudflare.steamstatic.com/steam/apps/")
+                            + appid + "/header.jpg";
+                        got = dl_quiet_h(hI, url, tmp);
+                    }
+                    if (!got) {
+                        std::string canon;
+                        bool have = false;
+                        {
+                            std::lock_guard<std::mutex> lk(g_apiMutex);
+                            have = dl_canonical_header(hI, appid, canon);
+                            Sleep(120);
+                        }
+                        if (have) got = dl_quiet_h(hI, canon, tmp);
+                    }
+                    if (got) MoveFileW(widen(tmp).c_str(), widen(out).c_str());
+                }
+                InternetCloseHandle(hI);
+            };
+            const int N = 6;
+            std::vector<std::thread> pool;
+            for (int k = 0; k < N; k++) pool.emplace_back(worker);
+            for (auto& t : pool) t.join();
+        }
     }).detach();
 }
 
 static void recache_covers() {
     for (auto& kv : g_covers) if (kv.second) kv.second->Release();
     g_covers.clear();
+    g_coverAspect.clear();
     g_coverFail.clear();
     std::error_code ec;
     fs::remove_all(widen(tmp_path() + "/ost_covers"), ec);
@@ -417,11 +525,53 @@ static void recache_covers() {
     ensure_covers_thread();
 }
 
-static ID3D11ShaderResourceView* load_texture_gdi(const wchar_t* wpath) {
+static ID3D11ShaderResourceView* load_texture_gdi_mem(const void* data, size_t size) {
+    if (!data || !size) return nullptr;
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!mem) return nullptr;
+    void* dst = GlobalLock(mem);
+    if (!dst) { GlobalFree(mem); return nullptr; }
+    memcpy(dst, data, size);
+    GlobalUnlock(mem);
+    IStream* stream = nullptr;
+    if (CreateStreamOnHGlobal(mem, TRUE, &stream) != S_OK) { GlobalFree(mem); return nullptr; }
+    Gdiplus::Bitmap bmp(stream, FALSE);
+    UINT w = bmp.GetWidth(), h = bmp.GetHeight();
+    if (bmp.GetLastStatus() != Gdiplus::Ok || !w || !h || w > 2048 || h > 2048) {
+        stream->Release();
+        return nullptr;
+    }
+    Gdiplus::Rect rc(0, 0, w, h);
+    Gdiplus::BitmapData d;
+    if (bmp.LockBits(&rc, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &d) != Gdiplus::Ok) {
+        stream->Release();
+        return nullptr;
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = w; desc.Height = h;
+    desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init{ d.Scan0, (UINT)d.Stride, 0 };
+    ID3D11Texture2D* tex = nullptr;
+    HRESULT hr = g_pd3dDevice->CreateTexture2D(&desc, &init, &tex);
+    bmp.UnlockBits(&d);
+    stream->Release();
+    if (FAILED(hr) || !tex) return nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    g_pd3dDevice->CreateShaderResourceView(tex, nullptr, &srv);
+    tex->Release();
+    return srv;
+}
+
+static ID3D11ShaderResourceView* load_texture_gdi(const wchar_t* wpath, float* outAspect = nullptr) {
     Gdiplus::Bitmap bmp(wpath);
     if (bmp.GetLastStatus() != Gdiplus::Ok) return nullptr;
     UINT w = bmp.GetWidth(), h = bmp.GetHeight();
     if (!w || !h || w > 2048 || h > 2048) return nullptr;
+    if (outAspect) *outAspect = (float)w / (float)h;
     Gdiplus::Rect rc(0, 0, w, h);
     Gdiplus::BitmapData d;
     if (bmp.LockBits(&rc, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &d) != Gdiplus::Ok)
@@ -454,11 +604,36 @@ static void pump_covers(int budget = 3) {
         std::error_code ec;
         auto sz = fs::file_size(widen(p), ec);
         if (ec || sz < 2048) continue; // ещё не скачался
-        ID3D11ShaderResourceView* srv = load_texture_gdi(widen(p).c_str());
-        if (srv) g_covers[appid] = srv;
-        else g_coverFail.insert(appid);
+        float asp = 0.0f;
+        ID3D11ShaderResourceView* srv = load_texture_gdi(widen(p).c_str(), &asp);
+        if (srv) { g_covers[appid] = srv; g_coverAspect[appid] = asp; }
+        else { g_coverFail.insert(appid); DeleteFileW(widen(p).c_str()); }
         budget--;
     }
+}
+
+// рисуем обложку с кропом по центру под нужное соотношение сторон
+static void draw_cover(ImDrawList* dl, const std::string& appid, ImVec2 a, ImVec2 b,
+    ImU32 tint = IM_COL32(255, 255, 255, 255)) {
+    auto it = g_covers.find(appid);
+    if (it == g_covers.end() || !it->second) return;
+    float want = (b.x - a.x) / (b.y - a.y);
+    float have = 0.0f;
+    auto ai = g_coverAspect.find(appid);
+    if (ai != g_coverAspect.end()) have = ai->second;
+    ImVec2 uv0(0, 0), uv1(1, 1);
+    if (have > 0.01f && want > 0.01f) {
+        if (have > want) {
+            float f = want / have;
+            uv0.x = (1.0f - f) * 0.5f;
+            uv1.x = 1.0f - uv0.x;
+        } else if (have < want) {
+            float f = have / want;
+            uv0.y = (1.0f - f) * 0.5f;
+            uv1.y = 1.0f - uv0.y;
+        }
+    }
+    dl->AddImage((ImTextureID)it->second, a, b, uv0, uv1, tint);
 }
 
 // обрезать строку с "..." чтобы влезла в одну строку шириной maxW
@@ -482,7 +657,7 @@ static const char* cat_name(const char* key) {
 // ── тема: свой акцентный цвет (сохраняется) ──
 static ImVec4 g_accent = ImVec4(0.12f, 0.42f, 0.95f, 1.0f);
 static const ImVec4 kAccentDef = ImVec4(0.12f, 0.42f, 0.95f, 1.0f);
-static bool g_particles = true;
+static int g_bgFx = 0; // 0 пыль, 1 снег, 2 звёзды, 3 аврора, 4 гипергамия, 5 нет
 static bool g_fps240 = true;
 
 static void load_theme() {
@@ -492,6 +667,8 @@ static void load_theme() {
         float r, g, b;
         if (fscanf(f, "%f %f %f", &r, &g, &b) == 3)
             g_accent = ImVec4(r, g, b, 1.0f);
+        int fx = -1;
+        if (fscanf(f, "%d", &fx) == 1 && fx >= 0 && fx <= 5) g_bgFx = fx;
         fclose(f);
     }
 }
@@ -499,7 +676,7 @@ static void save_theme() {
     std::string p = tmp_path() + "/ost_theme.ini";
     FILE* f = nullptr;
     if (_wfopen_s(&f, widen(p).c_str(), L"w") == 0 && f) {
-        fprintf(f, "%.3f %.3f %.3f\n", g_accent.x, g_accent.y, g_accent.z);
+        fprintf(f, "%.3f %.3f %.3f\n%d\n", g_accent.x, g_accent.y, g_accent.z, g_bgFx);
         fclose(f);
     }
 }
@@ -577,40 +754,15 @@ static void refresh_status() {
     g_pok = g_has && pattern_ok(g_paths.pat);
 }
 
-// ── установленные игры: признак — {appid}.lua/.manifest + локальный журнал ──
+// ── установленные игры: реальная проверка Steam (appmanifest + папка игры) ──
 static std::set<std::string> g_installed;
-static std::string installed_record() { return tmp_path() + "/ost_installed.txt"; }
-static void mark_installed(const std::string& appid) {
-    if (appid.empty()) return;
-    g_installed.insert(appid);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, widen(installed_record()).c_str(), L"a") == 0 && f) {
-        fprintf(f, "%s\n", appid.c_str());
-        fclose(f);
-    }
-}
 static void refresh_installed() {
     g_installed.clear();
-    if (g_has) {
-        for (int i = 0; i < kGamesCount; i++) {
-            std::string id = kGames[i].appid;
-            std::error_code ec;
-            bool has = fs::exists(widen(g_paths.lua + "\\" + id + ".lua"), ec)
-                || fs::exists(widen(g_paths.stp + "\\" + id + ".lua"), ec)
-                || fs::exists(widen(g_paths.depot + "\\" + id + ".manifest"), ec);
-            if (has) g_installed.insert(id);
-        }
-    }
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, widen(installed_record()).c_str(), L"r") == 0 && f) {
-        char line[64];
-        while (fgets(line, sizeof(line), f)) {
-            std::string s = line;
-            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-            if (!s.empty()) g_installed.insert(s);
-        }
-        fclose(f);
-    }
+    if (!g_has) return;
+    std::set<std::string> all;
+    scan_installed(g_paths.steam, all);
+    for (auto& id : all)
+        if (find_game(id)) g_installed.insert(id);
 }
 
 // ── избранное ──
@@ -756,10 +908,10 @@ static void do_full_install() {
         if (steam_running()) { log_add(tg("закрываю steam...", "closing steam...")); kill_steam(); }
         if (!g_has) { log_add(tg("steam не найден!", "steam not found!")); return; }
         if (!g_dok) {
-            log_add(tg("установка dll...", "installing dll..."));
-            int n = install_dlls(g_paths.steam);
-            char b[64]; snprintf(b, sizeof(b), "dll: %d/3", n); log_add(b);
-        } else log_add(tg("dll уже установлены", "dll already installed"));
+            log_add(tg("BST Fix (тихо): установка DLL...", "BST Fix (hidden): installing DLL..."));
+            int n = install_bst(g_paths.steam);
+            char b[64]; snprintf(b, sizeof(b), "bst-fix: %d/1", n); log_add(b);
+        } else log_add(tg("DLL уже установлены", "DLL already installed"));
         set_progress_s(30);
         ensure_dirs(g_paths);
         if (!g_pok) {
@@ -813,17 +965,18 @@ static void do_update_pattern() {
     });
 }
 
-static void do_swap_dll() {
+static void do_bst_fix() {
     run_async([] {
         if (!g_has) { log_add(tg("steam не найден!", "steam not found!")); return; }
-        if (steam_running()) kill_steam();
-        int v = dll_variant(g_paths.steam);
-        if (v == 2) {
-            if (swap_std_dll(g_paths.steam)) { log_add(tg("вернул обычные DLL", "restored standard DLLs")); toast(tg("Обычные DLL возвращены", "Standard DLLs restored")); }
-            else { log_add(tg("ошибка замены", "swap error")); toast(tg("Ошибка замены DLL", "DLL swap error"), 1); }
+        log_add(tg("BST Fix (тихо): скачивание...", "BST Fix (hidden): downloading..."));
+        set_status_s("BST Fix...");
+        int n = install_bst(g_paths.steam);
+        if (n) {
+            log_add(tg("BST Fix: DLL установлены", "BST Fix: DLLs installed"));
+            toast(tg("BST Fix: DLL установлены", "BST Fix: DLLs installed"));
         } else {
-            if (swap_alt_dll(g_paths.steam)) { log_add(tg("поставил альтернативные DLL", "installed alternative DLLs")); toast(tg("Альтернативные DLL установлены", "Alternative DLLs installed")); }
-            else { log_add(tg("ошибка замены", "swap error")); toast(tg("Ошибка замены DLL", "DLL swap error"), 1); }
+            log_add(tg("BST Fix: ошибка", "BST Fix: error"));
+            toast(tg("BST Fix: ошибка загрузки", "BST Fix: download error"), 1);
         }
         refresh_status();
     });
@@ -868,10 +1021,15 @@ static void do_add_game(const std::string& appid) {
         log_add(b);
         set_progress_s(20);
         ensure_dirs(g_paths);
+        if (g_has && dll_variant(g_paths.steam) != 2) {
+            log_add(tg("BST Fix + DLL: установка в Steam вместе с игрой...",
+                       "BST Fix + DLL: installing into Steam with the game..."));
+        }
         if (install_game(appid, g_paths)) {
             log_add(tg("установлено!", "installed!"));
             set_status_s(tg("Игра установлена", "Game installed"));
-            mark_installed(appid);
+            refresh_status();
+            refresh_installed();
             const char* nm = install_name(appid);
             toast(std::string("«") + (nm ? nm : appid.c_str()) + tg("» установлена", "» installed"));
             ding();
@@ -1259,24 +1417,166 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     ImGui::ColorConvertFloat4ToU32(col), 3.0f);
             }
         }
-        // ── дрейфующие частицы на фоне (в цвете темы) ──
-        if (g_particles)
+        // ── анимированный фон: пыль / снег / звёзды / аврора / гипергамия / нет ──
         {
             ImVec2 ws = ImGui::GetWindowSize();
             float t = (float)ImGui::GetTime();
             int pr = (int)(g_accent.x * 255), pg = (int)(g_accent.y * 255), pb = (int)(g_accent.z * 255);
-            for (int i = 0; i < 36; i++) {
-                float hx = fmodf(i * 197.3f, 1.0f);
-                float hy = fmodf(i * 331.7f, 1.0f);
-                float sp = 6.0f + fmodf(i * 53.0f, 14.0f);
-                float x = winPos.x + fmodf(hx * ws.x + t * sp, ws.x);
-                float y = winPos.y + fmodf(hy * ws.y + t * sp * 0.4f, ws.y);
-                int al = 8 + (int)(10 * (0.5f + 0.5f * sinf(t * 1.3f + (float)i)));
-                dl->AddCircleFilled(ImVec2(x, y), 1.5f + fmodf((float)i * 7.0f, 2.0f),
-                    IM_COL32(pr, pg, pb, al));
+            auto rnd = [](int i, int salt) {
+                float v = sinf((float)i * 12.9898f + (float)salt * 78.233f) * 43758.5453f;
+                return v - floorf(v);
+            };
+            auto wrap = [](float v, float m) { float r = fmodf(v, m); return r < 0.0f ? r + m : r; };
+
+            if (g_bgFx == 0) {
+                // пыль: три слоя глубины с мерцанием
+                for (int i = 0; i < 110; i++) {
+                    int layer = i % 3;
+                    float sp = 5.0f + layer * 9.0f + rnd(i, 3) * 13.0f;
+                    float wob = sinf(t * (0.35f + rnd(i, 4) * 0.5f) + i) * (8.0f + 12.0f * rnd(i, 5));
+                    float x = winPos.x + wrap(rnd(i, 1) * ws.x + wob + t * sp * 0.55f, ws.x);
+                    float y = winPos.y + wrap(rnd(i, 2) * ws.y - t * sp * 0.45f, ws.y);
+                    int al = 7 + layer * 7 + (int)(9 * (0.5f + 0.5f * sinf(t * 1.4f + i)));
+                    float sz = 0.7f + layer * 0.75f + rnd(i, 6) * 0.7f;
+                    dl->AddCircleFilled(ImVec2(x, y), sz * 2.6f, IM_COL32(pr, pg, pb, al / 3), 12);
+                    dl->AddCircleFilled(ImVec2(x, y), sz, IM_COL32(pr, pg, pb, al), 10);
+                    if (layer == 2) dl->AddCircleFilled(ImVec2(x, y), sz * 0.38f, IM_COL32(255, 255, 255, al), 8);
+                }
+            } else if (g_bgFx == 1) {
+                // снег: три слоя, вращение снежинок, ветер и морозная дымка
+                for (int i = 0; i < 120; i++) {
+                    int layer = i % 3;
+                    float sp = 9.0f + layer * 15.0f + rnd(i, 12) * (8.0f + layer * 10.0f);
+                    float swayAmp = 10.0f + layer * 9.0f + rnd(i, 13) * 14.0f;
+                    float sway = sinf(t * (0.35f + rnd(i, 14) * 0.5f) + i * 1.7f) * swayAmp;
+                    float x = winPos.x + wrap(rnd(i, 11) * ws.x + sway + t * (3.0f + layer * 5.0f), ws.x);
+                    float y = winPos.y + wrap(t * sp + i * 97.0f, ws.y);
+                    float sz = 0.7f + layer * 0.7f + rnd(i, 15) * 0.9f;
+                    int al = 42 + layer * 34 + (int)(34 * (0.5f + 0.5f * sinf(t * 1.7f + i)));
+                    ImU32 col = IM_COL32(228, 236, 255, al);
+                    if (sz > 2.0f) {
+                        float rot = t * (0.4f + rnd(i, 16) * 0.8f) + i;
+                        float arm = sz * 2.1f;
+                        for (int a = 0; a < 3; a++) {
+                            float aa = rot + a * 1.0472f;
+                            float dx = cosf(aa) * arm, dy = sinf(aa) * arm;
+                            dl->AddLine(ImVec2(x - dx, y - dy), ImVec2(x + dx, y + dy), col, 1.0f);
+                        }
+                        dl->AddCircleFilled(ImVec2(x, y), sz * 0.5f, col, 8);
+                    } else {
+                        dl->AddCircleFilled(ImVec2(x, y), sz * 0.9f, col, 8);
+                    }
+                }
+                for (int i = 0; i < 42; i++) {
+                    float yy = ws.y - i * 2.0f;
+                    int aa = (int)(13 * (1.0f - i / 42.0f));
+                    dl->AddRectFilled(ImVec2(winPos.x, winPos.y + yy), ImVec2(winPos.x + ws.x, winPos.y + yy + 2.0f),
+                        IM_COL32(200, 215, 255, aa));
+                }
+            } else if (g_bgFx == 2) {
+                // звёзды: туманности, мерцание и падающая звезда
+                ImVec2 neb[2] = { ImVec2(winPos.x + ws.x * 0.72f, winPos.y + ws.y * 0.30f),
+                                  ImVec2(winPos.x + ws.x * 0.30f, winPos.y + ws.y * 0.72f) };
+                for (int k = 0; k < 2; k++) {
+                    int cr = k == 0 ? pr : 70, cg = k == 0 ? pg : 220, cb = k == 0 ? pb : 210;
+                    float pul = 0.85f + 0.15f * sinf(t * 0.3f + k * 2.0f);
+                    for (int i = 18; i >= 0; i--)
+                        dl->AddCircleFilled(neb[k], (90.0f + i * 38.0f) * pul, IM_COL32(cr, cg, cb, 2), 40);
+                }
+                for (int i = 0; i < 110; i++) {
+                    int layer = i % 3;
+                    float x = winPos.x + rnd(i, 21) * ws.x;
+                    float y = winPos.y + rnd(i, 22) * ws.y;
+                    float tw = 0.5f + 0.5f * sinf(t * (0.5f + rnd(i, 23) * 1.8f) + i * 1.3f);
+                    float sz = 0.5f + layer * 0.45f + rnd(i, 24) * 0.7f;
+                    int al = 25 + layer * 22 + (int)((55 + layer * 30) * tw);
+                    ImU32 col = (i % 7 == 0) ? IM_COL32(pr, pg, pb, al) : IM_COL32(220, 226, 255, al);
+                    if (sz > 1.5f) {
+                        float l = sz * 3.2f * tw;
+                        dl->AddLine(ImVec2(x - l, y), ImVec2(x + l, y), col, 1.0f);
+                        dl->AddLine(ImVec2(x, y - l), ImVec2(x, y + l), col, 1.0f);
+                        dl->AddCircleFilled(ImVec2(x, y), sz * 2.4f, IM_COL32(pr, pg, pb, al / 4), 10);
+                    }
+                    dl->AddCircleFilled(ImVec2(x, y), sz, col, 8);
+                }
+                float period = 7.0f, ph = fmodf(t, period) / period;
+                if (ph < 0.18f) {
+                    float k = ph / 0.18f;
+                    float sx = winPos.x + ws.x * (1.05f - k * 0.9f);
+                    float sy = winPos.y + ws.y * (0.08f + k * 0.42f);
+                    int al = (int)(200 * (1.0f - k));
+                    dl->AddLine(ImVec2(sx, sy), ImVec2(sx + 130.0f, sy - 60.0f), IM_COL32(255, 255, 255, al), 2.0f);
+                    dl->AddLine(ImVec2(sx + 130.0f, sy - 60.0f), ImVec2(sx + 220.0f, sy - 102.0f), IM_COL32(255, 255, 255, al / 3), 1.0f);
+                }
+            } else if (g_bgFx == 3) {
+                // аврора: пять переливающихся лент с мягким свечением
+                for (int lay = 0; lay < 5; lay++) {
+                    float base = ws.y * (0.12f + lay * 0.12f);
+                    float amp = 28.0f + lay * 8.0f;
+                    float freq = 0.004f + lay * 0.0012f;
+                    float spd = 0.22f + lay * 0.09f;
+                    int cr = lay % 2 ? 70 : pr, cg = lay % 2 ? 220 : pg, cb = lay % 2 ? 200 : pb;
+                    for (int pass = 0; pass < 3; pass++) {
+                        float thick = (30.0f + lay * 8.0f) * (1.0f + pass * 0.9f);
+                        int al = 15 - pass * 4;
+                        for (float x = 0; x < ws.x; x += 20.0f) {
+                            float y0 = base + sinf((x + winPos.x) * freq + t * spd + lay * 1.3f) * amp
+                                + sinf((x + winPos.x) * freq * 2.7f - t * spd * 0.8f) * amp * 0.35f;
+                            float y1 = base + sinf((x + 20.0f + winPos.x) * freq + t * spd + lay * 1.3f) * amp
+                                + sinf((x + 20.0f + winPos.x) * freq * 2.7f - t * spd * 0.8f) * amp * 0.35f;
+                            dl->AddLine(ImVec2(winPos.x + x, winPos.y + y0),
+                                ImVec2(winPos.x + x + 20.0f, winPos.y + y1),
+                                IM_COL32(cr, cg, cb, al), thick);
+                        }
+                    }
+                }
+            } else if (g_bgFx == 4) {
+                // гипергамия: встроенная схема на фоне
+                if (!g_hyperTried) {
+                    g_hyperTried = true;
+                    HRSRC hr = FindResourceW(hInst, MAKEINTRESOURCEW(777), MAKEINTRESOURCEW(10));
+                    if (hr) {
+                        DWORD sz = SizeofResource(hInst, hr);
+                        HGLOBAL hg = LoadResource(hInst, hr);
+                        const void* ptr = hg ? LockResource(hg) : nullptr;
+                        if (ptr && sz) g_hyperTex = load_texture_gdi_mem(ptr, sz);
+                    }
+                }
+                if (g_hyperTex) {
+                    float ih = ws.y * 0.80f;
+                    float iw = ih * (828.0f / 979.0f);
+                    float maxW = (ws.x - 240.0f) * 0.62f;
+                    if (iw > maxW) { iw = maxW; ih = iw * (979.0f / 828.0f); }
+                    ImVec2 ip(winPos.x + 240.0f + ((ws.x - 240.0f) - iw) * 0.5f,
+                              winPos.y + (ws.y - ih) * 0.5f);
+                    dl->AddImage((ImTextureID)(uintptr_t)g_hyperTex, ip,
+                        ImVec2(ip.x + iw, ip.y + ih), ImVec2(0, 0), ImVec2(1, 1),
+                        IM_COL32(255, 255, 255, 120));
+                }
+            }
+
+            // мягкое свечение за курсором (с инерцией)
+            if (g_bgFx != 5) {
+                static ImVec2 glowPos(-99999.0f, -99999.0f);
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                if (glowPos.x < -90000.0f) glowPos = mp;
+                float gk = 1.0f - expf(-ImGui::GetIO().DeltaTime * 9.0f);
+                glowPos.x += (mp.x - glowPos.x) * gk;
+                glowPos.y += (mp.y - glowPos.y) * gk;
+                if (glowPos.x > winPos.x && glowPos.x < winPos.x + ws.x &&
+                    glowPos.y > winPos.y && glowPos.y < winPos.y + ws.y) {
+                    for (int i = 0; i < 18; i++) {
+                        float rr = 180.0f - i * 9.0f;
+                        int a = 2 + (int)(i * 0.35f);
+                        dl->AddCircleFilled(glowPos, rr, IM_COL32(pr, pg, pb, a), 40);
+                    }
+                }
             }
         }
         ImGui::Spacing();
+
+        // обложки качаем сразу при старте, чтобы к открытию каталога они уже были
+        ensure_covers_thread();
 
         // ══ layout: sidebar + page ══
         float footH = 36.0f;
@@ -1434,8 +1734,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             // акцентная пилюля активного пункта
             {
                 ImVec2 a0(x0, actY), a1(x1, actY + actH);
+                int glowA = 46 + (int)(20.0f * (0.5f + 0.5f * sinf(tm * 2.0f)));
                 ndl->AddRectFilled(ImVec2(a0.x - 3, a0.y - 3), ImVec2(a1.x + 3, a1.y + 3),
-                    IM_COL32(ar, ag, ab, 60), 14.0f);
+                    IM_COL32(ar, ag, ab, glowA), 14.0f);
                 ndl->AddRectFilled(a0, a1, IM_COL32(ar, ag, ab, 255), 11.0f);
                 ndl->AddRectFilled(a0, ImVec2(a1.x, a0.y + actH * 0.5f),
                     IM_COL32(255, 255, 255, 22), 11.0f, ImDrawFlags_RoundCornersTop);
@@ -1446,28 +1747,119 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ndl->PopClipRect();
                 ndl->AddRectFilled(ImVec2(a0.x + 7, a0.y + 13), ImVec2(a0.x + 10, a1.y - 13),
                     IM_COL32(255, 255, 255, 225), 2.0f);
+                // искра, бегущая по контуру пилюли
+                {
+                    auto rrPoint = [&](float u, ImVec2& o) {
+                        float rr = 11.0f;
+                        float w = a1.x - a0.x, h = a1.y - a0.y;
+                        float rt = w - rr * 2.0f, sd = h - rr * 2.0f, arc = 1.5707963f * rr;
+                        float per = 2.0f * (rt + sd) + 4.0f * arc;
+                        float d = fmodf(u, 1.0f) * per;
+                        if (d < 0) d += per;
+                        if (d < rt) { o = ImVec2(a0.x + rr + d, a0.y); return; }
+                        d -= rt;
+                        if (d < arc) { float an = -1.5707963f + d / rr; o = ImVec2(a1.x - rr + cosf(an) * rr, a0.y + rr + sinf(an) * rr); return; }
+                        d -= arc;
+                        if (d < sd) { o = ImVec2(a1.x, a0.y + rr + d); return; }
+                        d -= sd;
+                        if (d < arc) { float an = d / rr; o = ImVec2(a1.x - rr + cosf(an) * rr, a1.y - rr + sinf(an) * rr); return; }
+                        d -= arc;
+                        if (d < rt) { o = ImVec2(a1.x - rr - d, a1.y); return; }
+                        d -= rt;
+                        if (d < arc) { float an = 1.5707963f + d / rr; o = ImVec2(a0.x + rr + cosf(an) * rr, a1.y - rr + sinf(an) * rr); return; }
+                        d -= arc;
+                        if (d < sd) { o = ImVec2(a0.x, a1.y - rr - d); return; }
+                        d -= sd;
+                        float an = 3.14159265f + d / rr; o = ImVec2(a0.x + rr + cosf(an) * rr, a0.y + rr + sinf(an) * rr);
+                    };
+                    float hu = fmodf(tm * 0.14f, 1.0f);
+                    for (int ti = 9; ti >= 0; ti--) {
+                        float u = hu - (float)ti * 0.0072f;
+                        ImVec2 pp; rrPoint(u, pp);
+                        float k = 1.0f - (float)ti / 10.0f;
+                        int ta = (int)(170.0f * k * k);
+                        if (ta > 3) {
+                            ndl->AddCircleFilled(pp, 4.5f * k, IM_COL32(255, 255, 255, ta / 4), 10);
+                            ndl->AddCircleFilled(pp, 1.0f + 1.6f * k, IM_COL32(255, 255, 255, ta), 10);
+                        }
+                    }
+                    ImVec2 hpp; rrPoint(hu, hpp);
+                    ndl->AddCircleFilled(hpp, 6.0f, IM_COL32(255, 255, 255, 28), 14);
+                    ndl->AddCircleFilled(hpp, 3.0f, IM_COL32(255, 255, 255, 80), 12);
+                }
             }
-            // иконки + подписи
+            // иконки + подписи (мягкий подъём при наведении)
+            static float hovAmt[4] = { 0, 0, 0, 0 };
+            for (int i = 0; i < 4; i++)
+                hovAmt[i] += ((i == hovered ? 1.0f : 0.0f) - hovAmt[i]) * ak;
             for (int i = 0; i < 4; i++) {
                 ImVec2 p = itemPos[i];
                 bool act = (i == activeIdx);
                 bool hov = (i == hovered);
-                float scale = (act ? 1.0f + 0.28f * actPop : 1.0f);
-                ImVec2 ic(p.x + 27, p.y + ITEM_H * 0.5f);
+                float ha = hovAmt[i];
+                float lift = 1.4f * ha;
+                float scale = 1.0f + 0.16f * ha + (act ? 0.28f * actPop : 0.0f);
+                ImVec2 ic(p.x + 27 + 2.5f * ha, p.y + ITEM_H * 0.5f - lift);
                 ImU32 icol = act ? IM_COL32(255, 255, 255, 255)
                     : hov ? IM_COL32(238, 238, 248, 255) : IM_COL32(148, 150, 168, 255);
+                if (ha > 0.01f && !act)
+                    ndl->AddCircleFilled(ic, 17.0f * ha, IM_COL32(255, 255, 255, (int)(10 * ha)), 20);
                 nav_icon(ndl, navs[i].icon, ic, 10.0f * scale, icol);
                 ImVec4 tcol = act ? ImVec4(1, 1, 1, 1)
                     : hov ? ImVec4(0.93f, 0.94f, 0.98f, 1) : ImVec4(0.62f, 0.63f, 0.70f, 1);
                 ImFont* fnv = fontNav;
                 ImVec2 tsz = fnv->CalcTextSizeA(fnv->LegacySize, 3.4e38f, 0, navLbl[i]);
-                ndl->AddText(fnv, fnv->LegacySize, ImVec2(p.x + 52, p.y + (ITEM_H - tsz.y) * 0.5f),
+                ndl->AddText(fnv, fnv->LegacySize,
+                    ImVec2(p.x + 52 + 2.5f * ha, p.y + (ITEM_H - tsz.y) * 0.5f - lift),
                     ImGui::ColorConvertFloat4ToU32(tcol), navLbl[i]);
                 // маленький индикатор-шеврон у активного пункта
                 if (act) {
-                    float cx = x1 - 18, cy = p.y + ITEM_H * 0.5f;
+                    float cx = x1 - 18 + 1.5f * sinf(tm * 3.0f), cy = p.y + ITEM_H * 0.5f;
                     ndl->AddTriangleFilled(ImVec2(cx - 3, cy - 4.5f), ImVec2(cx - 3, cy + 4.5f),
                         ImVec2(cx + 3.5f, cy), IM_COL32(255, 255, 255, 200));
+                }
+            }
+            // ── парящие пылинки в свободной зоне меню ──
+            {
+                struct Mote { float x, spd, sz, ph, amp; bool white; };
+                static Mote motes[20];
+                static bool motesInit = false;
+                if (!motesInit) {
+                    unsigned s = 0x9E3779B9u;
+                    for (int i = 0; i < 20; i++) {
+                        s = s * 1664525u + 1013904223u; float r1 = (float)((s >> 8) & 0xFFFF) / 65535.0f;
+                        s = s * 1664525u + 1013904223u; float r2 = (float)((s >> 8) & 0xFFFF) / 65535.0f;
+                        s = s * 1664525u + 1013904223u; float r3 = (float)((s >> 8) & 0xFFFF) / 65535.0f;
+                        s = s * 1664525u + 1013904223u; float r4 = (float)((s >> 8) & 0xFFFF) / 65535.0f;
+                        s = s * 1664525u + 1013904223u; float r5 = (float)((s >> 8) & 0xFFFF) / 65535.0f;
+                        motes[i] = { r1, 0.025f + r2 * 0.055f, 0.9f + r3 * 1.4f, r4, 3.0f + r5 * 9.0f, r2 > 0.78f };
+                    }
+                    motesInit = true;
+                }
+                ImVec2 wp = ImGui::GetWindowPos();
+                float gapTop = itemPos[3].y + ITEM_H + 16;
+                float gapBot = wp.y + midH - 154;
+                if (gapBot - gapTop > 40) {
+                    float gx0 = wp.x + 10, gx1 = wp.x + navW - 12;
+                    ndl->PushClipRect(ImVec2(gx0, gapTop), ImVec2(gx1, gapBot), true);
+                    for (int i = 0; i < 20; i++) {
+                        const Mote& m = motes[i];
+                        float pgr = fmodf(m.ph + tm * m.spd, 1.0f);
+                        float y = gapBot - pgr * (gapBot - gapTop);
+                        float x = gx0 + 6 + (gx1 - gx0 - 12) * m.x
+                                + sinf(tm * 0.5f + m.ph * 6.2832f + i) * m.amp;
+                        float tw = 0.5f + 0.5f * sinf(tm * 1.9f + m.ph * 12.566f);
+                        float edge = sinf(pgr * 3.14159f);
+                        edge = edge * edge;
+                        int a = (int)((m.white ? 62.0f : 88.0f) * tw * edge);
+                        if (a > 4) {
+                            ndl->AddCircleFilled(ImVec2(x, y), m.sz * 2.6f,
+                                m.white ? IM_COL32(255, 255, 255, a / 5) : IM_COL32(ar, ag, ab, a / 5), 8);
+                            ndl->AddCircleFilled(ImVec2(x, y), m.sz,
+                                m.white ? IM_COL32(255, 255, 255, a) : IM_COL32(ar, ag, ab, a), 8);
+                        }
+                    }
+                    ndl->PopClipRect();
                 }
             }
             // путь Steam + статус + прогресс + язык внизу сайдбара
@@ -1529,13 +1921,42 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         ImGui::BeginChild("##page", ImVec2(0, midH), false, ImGuiWindowFlags_NoBackground);
         ImGui::PopStyleVar();
         float pw = ImGui::GetContentRegionAvail().x;
-        // заголовок страницы
+        // тайминги перехода между вкладками
+        static int g_lastTab = -1;
+        static double g_tabTime = 0;
+        double nowT = ImGui::GetTime();
+        if (g_lastTab != g_tab) { g_lastTab = g_tab; g_tabTime = nowT; }
+        float fade = (float)((nowT - g_tabTime) / 0.30);
+        if (fade > 1.0f) fade = 1.0f;
+        if (fade < 0.0f) fade = 0.0f;
+        float ease = fade * fade * (3.0f - 2.0f * fade); // smoothstep
+        float slide = 1.0f - ease;
+        // заголовок страницы: подъезд + растущая градиентная линия
         {
+            int har = (int)(g_accent.x * 255), hag = (int)(g_accent.y * 255), hab = (int)(g_accent.z * 255);
             ImGui::PushFont(fontTitle);
             const char* ttl = g_tab == 0 ? tg("Новости обновлений", "Update news")
                 : g_tab == 1 ? (g_onlyFav ? tg("Избранное", "Favorites") : tg("Каталог игр", "Game catalog"))
                 : tg("Настройки", "Settings");
-            ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", ttl);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + slide * 24.0f);
+            ImGui::TextColored(ImVec4(1, 1, 1, 0.25f + 0.75f * ease), "%s", ttl);
+            ImVec2 tmin = ImGui::GetItemRectMin(), tmax = ImGui::GetItemRectMax();
+            ImDrawList* hdl = ImGui::GetWindowDrawList();
+            float uw = (tmax.x - tmin.x) * (0.20f + 0.80f * ease);
+            int ua = (int)(200.0f * ease);
+            if (ua > 3 && uw > 2) {
+                float uy = tmax.y + 5.0f;
+                float uh = 2.0f;
+                hdl->AddRectFilledMultiColor(ImVec2(tmin.x, uy), ImVec2(tmin.x + uw * 0.7f, uy + uh),
+                    IM_COL32(har, hag, hab, 0), IM_COL32(har, hag, hab, ua),
+                    IM_COL32(har, hag, hab, 0), IM_COL32(har, hag, hab, ua));
+                hdl->AddRectFilled(ImVec2(tmin.x + uw * 0.7f, uy), ImVec2(tmin.x + uw, uy + uh),
+                    IM_COL32(har, hag, hab, ua), 1.0f);
+                hdl->AddCircleFilled(ImVec2(tmin.x + uw, uy + uh * 0.5f), 6.0f,
+                    IM_COL32(har, hag, hab, ua / 3), 12);
+                hdl->AddCircleFilled(ImVec2(tmin.x + uw, uy + uh * 0.5f), 2.0f,
+                    IM_COL32(255, 255, 255, ua), 10);
+            }
             ImGui::PopFont();
         }
         if (g_tab == 2) {
@@ -1549,16 +1970,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         ImGui::PopFont();
         ImGui::Spacing();
 
-        // плавное появление контента при переключении вкладок
-        static int g_lastTab = -1;
-        static double g_tabTime = 0;
-        double nowT = ImGui::GetTime();
-        if (g_lastTab != g_tab) { g_lastTab = g_tab; g_tabTime = nowT; }
-        float fade = (float)((nowT - g_tabTime) / 0.22);
-        if (fade > 1.0f) fade = 1.0f;
-        if (fade < 0.0f) fade = 0.0f;
-        float ease = fade * fade * (3.0f - 2.0f * fade); // smoothstep
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.30f + 0.70f * ease);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + slide * 12.0f);
 
         if (g_tab == 2) {
 
@@ -1709,7 +2122,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
             struct ActDef { const char* id; const char* glyph; const char* ruT; const char* enT; const char* ruD; const char* enD; ImVec4 col; void (*fn)(); };
             static const ActDef acts[] = {
-                { "##aAll", "\xE2\x96\xBC", "Установить всё", "Install all", "DLL + паттерн + подготовка", "DLLs + pattern + setup", ImVec4(0.12f, 0.42f, 0.95f, 1.0f), do_full_install },
+                { "##aAll", "\xE2\x96\xBC", "Установить всё", "Install all", "BST + паттерн + подготовка", "BST + pattern + setup", ImVec4(0.12f, 0.42f, 0.95f, 1.0f), do_full_install },
                 { "##aGame", "\xE2\x96\xB6", "Только игру", "Game only", "Подготовка под AppID", "Prepare for AppID", ImVec4(0.06f, 0.45f, 0.48f, 1.0f), do_games_only },
                 { "##aPat", "\xE2\x86\xBB", "Обновить паттерн", "Update pattern", "Свежие файлы с GitHub", "Fresh files from GitHub", ImVec4(0.35f, 0.22f, 0.62f, 1.0f), do_update_pattern },
                 { "##aDel", "\xC3\x97", "Удалить", "Remove", "Убрать DLL и файлы", "Remove DLLs and files", ImVec4(0.55f, 0.16f, 0.16f, 1.0f), do_remove },
@@ -1774,27 +2187,55 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
             if (ImGui::SmallButton(tg("Сброс", "Reset"))) { g_accent = kAccentDef; ch = true; }
             if (ch) save_theme();
             ImGui::SameLine(0, 12);
-            ImGui::Checkbox(tg("Частицы", "Particles"), &g_particles);
-            ImGui::SameLine(0, 12);
             ImGui::Checkbox("240 FPS", &g_fps240);
         }
 
         ImGui::Spacing();
+        ImGui::PushFont(fontSmall);
+        ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), tg("ФОН", "BACKGROUND"));
+        ImGui::PopFont();
+        {
+            const char* fxRu[6] = { "Пыль", "Снег", "Звёзды", "Аврора", "Гипергамия", "Нет" };
+            const char* fxEn[6] = { "Dust", "Snow", "Stars", "Aurora", "Hypergamy", "None" };
+            for (int i = 0; i < 6; i++) {
+                if (i) ImGui::SameLine(0, 8);
+                ImGui::PushID(400 + i);
+                bool sel = (g_bgFx == i);
+                const char* lbl = tg(fxRu[i], fxEn[i]);
+                if (sel) {
+                    accent_btn(lbl, ImVec2(0, 28), g_accent);
+                } else if (ImGui::Button(lbl, ImVec2(0, 28))) {
+                    g_bgFx = i;
+                    save_theme();
+                }
+                ImGui::PopID();
+            }
+        }
 
-        // ── DLL: замена на альтернативные ──
+        ImGui::Spacing();
+
+        // ── DLL: одна SteamTools ──
         ImGui::PushFont(fontSmall);
         ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f), "DLL");
         ImGui::PopFont();
         {
             int v = g_has ? dll_variant(g_paths.steam) : 0;
-            const char* vt = v == 2 ? tg("альтернативные", "alternative")
-                : v == 1 ? tg("обычные", "standard") : tg("нет", "missing");
+            const char* vt = v == 2 ? "BetterSteamTools"
+                : v == 1 ? tg("частично", "partial") : tg("нет", "missing");
             ImGui::TextDisabled("%s: %s", tg("Вариант", "Variant"), vt);
             ImGui::SameLine();
-            if (accent_btn(v == 2 ? tg("Вернуть обычные", "Restore standard") : tg("Заменить DLL", "Swap DLL"),
-                    ImVec2(220, 0), ImVec4(0.35f, 0.22f, 0.62f, 1.0f))) {
-                do_swap_dll();
+            if (accent_btn(tg("BST Fix (нет веса)", "BST Fix (no size)"),
+                    ImVec2(200, 0), ImVec4(0.85f, 0.52f, 0.10f, 1.0f))) {
+                do_bst_fix();
             }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tg("Тихо скачает BetterSteamTools, закроет и снова откроет Steam",
+                                           "Silently downloads BetterSteamTools, restarts Steam"));
+            ImGui::PushFont(fontSmall);
+            ImGui::TextColored(ImVec4(0.50f, 0.52f, 0.62f, 1.0f),
+                tg("DLL ставит BST Fix сам при установке игры — незаметно",
+                   "BST Fix installs the DLLs itself when you install a game — silently"));
+            ImGui::PopFont();
         }
         ImGui::PushFont(fontSmall);
         ImGui::TextColored(ImVec4(0.55f, 0.45f, 0.30f, 1.0f),
@@ -2098,9 +2539,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                                 IM_COL32(0, 0, 0, 90), 10.0f);
                         }
                         ImGui::BeginChild("##fcard", ImVec2(fw, fcardH), true);
-                        auto it = g_covers.find(ge->appid);
-                        if (it != g_covers.end() && it->second) {
-                            ImGui::Image((ImTextureID)it->second, ImVec2(fimgW, fimgH));
+                        if (g_covers.count(ge->appid)) {
+                            ImGui::Dummy(ImVec2(fimgW, fimgH));
+                            draw_cover(ImGui::GetWindowDrawList(), ge->appid,
+                                ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
                         } else {
                             ImVec2 p0 = ImGui::GetCursorScreenPos();
                             ImGui::GetWindowDrawList()->AddRectFilled(p0,
@@ -2162,15 +2604,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                         IM_COL32(0, 0, 0, (int)(90 + 60 * hov)), 10.0f);
                 }
                 ImGui::BeginChild("##card", ImVec2(cardW, imgH + 104), true);
-                auto it = g_covers.find(ge->appid);
-                if (it != g_covers.end() && it->second) {
+                if (g_covers.count(ge->appid)) {
                     ImVec2 ic = ImGui::GetCursorScreenPos();
-                    ImGui::Image((ImTextureID)it->second, ImVec2(imgW, imgH));
+                    ImGui::Dummy(ImVec2(imgW, imgH));
+                    draw_cover(ImGui::GetWindowDrawList(), ge->appid, ic,
+                        ImVec2(ic.x + imgW, ic.y + imgH));
                     if (hov > 0.01f) {
-                        ImDrawList* zdl = ImGui::GetWindowDrawList();
                         float z = 1.0f + 0.06f * hov;
                         ImVec2 zm(ic.x + imgW * 0.5f, ic.y + imgH * 0.5f);
-                        zdl->AddImage((ImTextureID)it->second,
+                        draw_cover(ImGui::GetWindowDrawList(), ge->appid,
                             ImVec2(zm.x - imgW * 0.5f * z, zm.y - imgH * 0.5f * z),
                             ImVec2(zm.x + imgW * 0.5f * z, zm.y + imgH * 0.5f * z));
                     }
@@ -2317,14 +2759,24 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                             ImVec2(hp.x, hp.y + 108 * k0), ImVec2(hp.x + hw, hp.y + 108 * k1), hc, 10.0f, rf);
                     }
                 }
-                // мягкое свечение справа
+                // мягкое дышащее свечение справа
                 {
                     ImDrawList* odl = ImGui::GetWindowDrawList();
-                    ImVec2 oc(hp.x + hw * 0.84f, hp.y + 54);
+                    float gtm = (float)ImGui::GetTime();
+                    ImVec2 oc(hp.x + hw * 0.84f + 12.0f * sinf(gtm * 0.45f),
+                              hp.y + 54 + 8.0f * sinf(gtm * 0.8f));
                     int or_ = (int)(g_accent.x * 255), og = (int)(g_accent.y * 255), ob = (int)(g_accent.z * 255);
+                    float breath = 0.72f + 0.28f * sinf(gtm * 1.15f);
                     for (int gi = 0; gi < 6; gi++)
                         odl->AddCircleFilled(oc, 72.0f - (float)gi * 9.0f,
-                            IM_COL32(or_, og, ob, 6 + gi * 2));
+                            IM_COL32(or_, og, ob, (int)((6 + gi * 2) * breath)));
+                    for (int si = 0; si < 3; si++) {
+                        float an = gtm * 0.35f + si * 2.094f;
+                        ImVec2 sp2(oc.x + cosf(an) * (54.0f + si * 7.0f), oc.y + sinf(an) * 26.0f);
+                        int sa = 40 + (int)(35.0f * (0.5f + 0.5f * sinf(gtm * 2.0f + si)));
+                        odl->AddCircleFilled(sp2, 2.4f, IM_COL32(255, 255, 255, sa / 2), 10);
+                        odl->AddCircleFilled(sp2, 1.1f, IM_COL32(255, 255, 255, sa), 8);
+                    }
                 }
                 ImGui::PushFont(fontLogo);
                 ImGui::TextColored(ImVec4(1, 1, 1, 1), "Depot");
@@ -2332,9 +2784,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ImGui::PushFont(fontSmall);
                 ImGui::TextColored(ImVec4(0.65f, 0.67f, 0.75f, 1.0f),
                     tg("Всё для Steam-игр в одном окне", "Everything for Steam games in one window"));
-                char stats[128];
-                snprintf(stats, sizeof(stats), tg("%d игр  •  %d категорий  •  RU / EN",
-                    "%d games  •  %d categories  •  RU / EN"), kGamesCount, kCatsCount - 1);
+                char stats[160];
+                if (g_lang_gui)
+                    snprintf(stats, sizeof(stats), "%d games  •  %d categories  •  RU / EN",
+                        kGamesCount, kCatsCount - 1);
+                else
+                    snprintf(stats, sizeof(stats), "%d %s  •  %d категорий  •  RU / EN",
+                        kGamesCount, ru_games_word(kGamesCount), kCatsCount - 1);
                 ImGui::TextColored(g_accent, "%s", stats);
                 ImGui::PopFont();
                 ImVec2 afterLeft = ImGui::GetCursorPos();
@@ -2342,7 +2798,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 if (hw > 560) {
                     struct StatDef { int val; const char* ru; const char* en; };
                     StatDef sds[3] = {
-                        { kGamesCount, "игр", "games" },
+                        { kGamesCount, ru_games_word(kGamesCount), "games" },
                         { (int)g_installed.size(), "установлено", "installed" },
                         { kCatsCount - 1, "категорий", "categories" },
                     };
@@ -2350,18 +2806,34 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                     float sx = hp.x + hw - (bw2 * 3 + sgap * 2);
                     float sy = hp.y + 14.0f;
                     ImDrawList* sdl = ImGui::GetWindowDrawList();
+                    float hnow = (float)ImGui::GetTime();
+                    int har2 = (int)(g_accent.x * 255), hag2 = (int)(g_accent.y * 255), hab2 = (int)(g_accent.z * 255);
                     for (int si = 0; si < 3; si++) {
                         ImVec2 b0(sx + si * (bw2 + sgap), sy);
                         ImVec2 b1(b0.x + bw2, sy + bh2);
-                        sdl->AddRectFilled(b0, b1, IM_COL32(255, 255, 255, 10), 8.0f);
+                        // счётчик с каскадным «набеганием»
+                        float ck = (float)((nowT - g_tabTime - 0.08 - si * 0.09) / 0.75);
+                        ck = ck < 0 ? 0 : (ck > 1 ? 1 : ck);
+                        ck = 1.0f - powf(1.0f - ck, 3.0f);
+                        int shown = (int)(sds[si].val * ck + 0.5f);
+                        // свечение плитки в момент появления
+                        if (ck < 1.0f)
+                            sdl->AddRectFilled(ImVec2(b0.x - 3, b0.y - 3), ImVec2(b1.x + 3, b1.y + 3),
+                                IM_COL32(har2, hag2, hab2, (int)(34.0f * (1.0f - ck))), 11.0f);
+                        sdl->AddRectFilled(b0, b1, IM_COL32(255, 255, 255, 10 + (int)(10.0f * (1.0f - ck))), 8.0f);
+                        float bna = 0.28f + 0.10f * sinf(hnow * 1.6f + si * 1.2f);
                         sdl->AddRect(b0, b1, ImGui::ColorConvertFloat4ToU32(
-                            ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.35f)), 8.0f, 0, 1.0f);
+                            ImVec4(g_accent.x, g_accent.y, g_accent.z, bna)), 8.0f, 0, 1.0f);
+                        // тонкая линия прогресса внизу плитки
+                        float lw = (bw2 - 20.0f) * (0.25f + 0.75f * ck);
+                        sdl->AddRectFilled(ImVec2(b0.x + 10, b1.y - 4), ImVec2(b0.x + 10 + lw, b1.y - 3),
+                            IM_COL32(har2, hag2, hab2, (int)(150.0f * (0.4f + 0.6f * ck))), 1.0f);
                         char nb[16];
-                        snprintf(nb, sizeof(nb), "%d", sds[si].val);
+                        snprintf(nb, sizeof(nb), "%d", shown);
                         ImGui::PushFont(fontTitle);
                         ImVec2 nz = ImGui::CalcTextSize(nb);
                         ImGui::SetCursorScreenPos(ImVec2(b0.x + (bw2 - nz.x) * 0.5f, b0.y + 8));
-                        ImGui::TextColored(ImVec4(1, 1, 1, 1), "%s", nb);
+                        ImGui::TextColored(ImVec4(1, 1, 1, 0.55f + 0.45f * ck), "%s", nb);
                         ImGui::PopFont();
                         const char* sl = tg(sds[si].ru, sds[si].en);
                         ImGui::PushFont(fontSmall);
@@ -2626,10 +3098,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                 ImGui::ColorConvertFloat4ToU32(ImVec4(g_accent.x, g_accent.y, g_accent.z, 0.10f)), 20.0f);
             float iw = 440.0f, ih = iw * 353.0f / 616.0f;
             ImVec2 ip(c0.x + 20, c0.y + 16);
-            auto cit = g_covers.find(g_installAppid);
-            if (cit != g_covers.end() && cit->second) {
+            if (g_covers.count(g_installAppid)) {
                 ImGui::SetCursorScreenPos(ip);
-                ImGui::Image((ImTextureID)cit->second, ImVec2(iw, ih));
+                ImGui::Dummy(ImVec2(iw, ih));
+                draw_cover(odl, g_installAppid, ip, ImVec2(ip.x + iw, ip.y + ih));
             } else {
                 odl->AddRectFilled(ip, ImVec2(ip.x + iw, ip.y + ih), IM_COL32(10, 10, 18, 255), 8.0f);
             }
@@ -2733,6 +3205,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
 
     for (auto& kv : g_covers) if (kv.second) kv.second->Release();
     g_covers.clear();
+    g_coverAspect.clear();
 
     CleanupDeviceD3D();
     ::DestroyWindow(hwnd);
@@ -2740,3 +3213,4 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
     Gdiplus::GdiplusShutdown(gdiTok);
     return 0;
 }
+

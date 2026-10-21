@@ -1,6 +1,7 @@
 // core.cpp — steam + install logic implementation
 #include "core.h"
 #include "ui.h"
+#include <shellapi.h>
 
 std::wstring widen(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -78,9 +79,7 @@ void ensure_dirs(const Paths& p) {
 }
 
 bool dlls_ok(const std::string& s) {
-    return fs::exists(widen(s + "\\dwmapi.dll")) &&
-           fs::exists(widen(s + "\\OpenSteamTool.dll")) &&
-           fs::exists(widen(s + "\\xinput1_4.dll"));
+    return dll_variant(s) == 2;
 }
 
 bool pattern_ok(const std::string& p) {
@@ -110,39 +109,85 @@ bool drop_res(int id, const std::string& out) {
     return wr == sz;
 }
 
-int install_dlls(const std::string& steam) {
-    int n = 0;
-    n += drop_res(101, steam + "\\dwmapi.dll")        ? 1 : 0;
-    n += drop_res(102, steam + "\\OpenSteamTool.dll")  ? 1 : 0;
-    n += drop_res(103, steam + "\\xinput1_4.dll")      ? 1 : 0;
-    return n;
-}
-
-// размер ресурса внутри exe (для определения варианта DLL)
-static DWORD res_size(int id) {
-    HRSRC h = FindResourceA(nullptr, MAKEINTRESOURCEA(id), (LPCSTR)RT_RCDATA);
-    if (!h) return 0;
-    return SizeofResource(nullptr, h);
-}
-
-// 0 — нет файла, 1 — обычная xinput1_4.dll (103), 2 — альтернативная (104)
+// 0 — нет DLL, 1 — частично, 2 — полный набор BetterSteamTools (dwmapi + OpenSteamTool + xinput)
 int dll_variant(const std::string& steam) {
-    std::string fp = steam + "\\xinput1_4.dll";
-    WIN32_FILE_ATTRIBUTE_DATA ad{};
-    if (!GetFileAttributesExA(fp.c_str(), GetFileExInfoStandard, &ad)) return 0;
-    DWORD sz = ad.nFileSizeLow;
-    DWORD sAlt = res_size(104), sStd = res_size(103);
-    if (sAlt && sz == sAlt) return 2;
-    if (sStd && sz == sStd) return 1;
+    bool a = fs::exists(widen(steam + "\\dwmapi.dll"));
+    bool b = fs::exists(widen(steam + "\\OpenSteamTool.dll"));
+    bool c = fs::exists(widen(steam + "\\xinput1_4.dll"));
+    if (a && b && c) return 2;
+    if (a || b || c) return 1;
     return 0;
 }
 
-bool swap_alt_dll(const std::string& steam) {
-    return drop_res(104, steam + "\\xinput1_4.dll");
+// ── реальная проверка установленных игр: appmanifest + непустая папка игры ──
+static std::string vdf_unescape(const std::string& s) {
+    std::string r;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size()) r += s[++i];
+        else r += s[i];
+    }
+    return r;
 }
 
-bool swap_std_dll(const std::string& steam) {
-    return drop_res(103, steam + "\\xinput1_4.dll");
+static std::string vdf_val(const std::string& line, const char* key) {
+    size_t p = line.find(key);
+    if (p == std::string::npos) return "";
+    size_t q1 = line.find('"', p + strlen(key));
+    if (q1 == std::string::npos) return "";
+    size_t q2 = line.find('"', q1 + 1);
+    if (q2 == std::string::npos) return "";
+    return vdf_unescape(line.substr(q1 + 1, q2 - q1 - 1));
+}
+
+static bool dir_nonempty(const std::string& p) {
+    std::error_code ec;
+    if (!fs::is_directory(widen(p), ec)) return false;
+    for (auto& e : fs::directory_iterator(widen(p), ec)) {
+        if (ec) return false;
+        (void)e;
+        return true;
+    }
+    return false;
+}
+
+void scan_installed(const std::string& steam, std::set<std::string>& out) {
+    out.clear();
+    std::vector<std::string> libs{ steam };
+    FILE* vf = fopen((steam + "\\steamapps\\libraryfolders.vdf").c_str(), "r");
+    if (vf) {
+        char line[1024];
+        while (fgets(line, sizeof(line), vf)) {
+            std::string path = vdf_val(line, "\"path\"");
+            if (!path.empty()) libs.push_back(path);
+        }
+        fclose(vf);
+    }
+    for (auto& lib : libs) {
+        std::string sa = lib + "\\steamapps";
+        std::error_code ec;
+        if (!fs::is_directory(widen(sa), ec)) continue;
+        for (auto& e : fs::directory_iterator(widen(sa), ec)) {
+            if (ec) break;
+            if (!e.is_regular_file()) continue;
+            std::wstring wfn = e.path().filename().wstring();
+            std::string fn(wfn.begin(), wfn.end());
+            if (fn.rfind("appmanifest_", 0) != 0 || fn.size() < 16) continue;
+            std::string appid = fn.substr(12, fn.size() - 12 - 4);
+            FILE* af = _wfopen(e.path().c_str(), L"r");
+            if (!af) continue;
+            std::string idir, sflags;
+            char al[1024];
+            while (fgets(al, sizeof(al), af)) {
+                std::string s = al;
+                if (idir.empty()) idir = vdf_val(s, "\"installdir\"");
+                if (sflags.empty()) sflags = vdf_val(s, "\"StateFlags\"");
+            }
+            fclose(af);
+            long flags = sflags.empty() ? 4 : atol(sflags.c_str());
+            if (!(flags & 4) || idir.empty()) continue;
+            if (dir_nonempty(sa + "\\common\\" + idir)) out.insert(appid);
+        }
+    }
 }
 
 // ── download ──
@@ -256,8 +301,72 @@ int dl_ipc(const std::string& ipcDir) {
     return n;
 }
 
+// тихо (без окна) выполняем bst-fix: качаем релиз BetterSteamTools и раскладываем в Steam
+static bool bst_fix_hidden(const std::string& steam) {
+    std::string tmp = tmp_path() + "\\ost_bst";
+    std::error_code ec;
+    fs::remove_all(widen(tmp), ec);
+    fs::create_directories(widen(tmp), ec);
+    std::string scr = tmp + "\\bst-fix.ps1";
+    if (!dl("https://www.steamtools.app/bst-fix.ps1", scr)) { fs::remove_all(widen(tmp), ec); return false; }
+    std::string url;
+    {
+        FILE* f = fopen(scr.c_str(), "rb");
+        if (f) {
+            std::string all; char buf[4096]; size_t rd = 0;
+            while ((rd = fread(buf, 1, sizeof(buf), f)) > 0) all.append(buf, rd);
+            fclose(f);
+            size_t p = all.find("-Uri \"");
+            if (p != std::string::npos) {
+                size_t q1 = p + 6, q2 = all.find('"', q1);
+                if (q2 != std::string::npos) url = all.substr(q1, q2 - q1);
+            }
+            if (url.empty()) {
+                size_t pz = all.find("https://");
+                while (pz != std::string::npos) {
+                    size_t q2 = all.find('"', pz);
+                    if (q2 == std::string::npos) break;
+                    std::string u = all.substr(pz, q2 - pz);
+                    if (u.find(".zip") != std::string::npos) { url = u; break; }
+                    pz = all.find("https://", q2);
+                }
+            }
+        }
+    }
+    if (url.empty()) { fs::remove_all(widen(tmp), ec); return false; }
+    std::string zip = tmp + "\\bst.zip";
+    if (!dl(url, zip)) { fs::remove_all(widen(tmp), ec); return false; }
+    std::string wrap = tmp + "\\x.ps1";
+    FILE* w = fopen(wrap.c_str(), "w");
+    if (!w) { fs::remove_all(widen(tmp), ec); return false; }
+    fprintf(w,
+        "$ErrorActionPreference='Stop'\n"
+        "Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\n"
+        "Remove-Item -LiteralPath '%s' -Force -ErrorAction SilentlyContinue\n",
+        zip.c_str(), steam.c_str(), zip.c_str());
+    fclose(w);
+    int rc = run_hidden("powershell -NoProfile -ExecutionPolicy Bypass -File \"" + wrap + "\"");
+    fs::remove_all(widen(tmp), ec);
+    return rc == 0;
+}
+
+// bst-fix целиком: закрыть Steam (если был), разложить DLL, вернуть Steam
+int install_bst(const std::string& steam) {
+    bool was = steam_running();
+    if (was) kill_steam();
+    bool okk = bst_fix_hidden(steam);
+    if (was) ShellExecuteA(nullptr, "open", (steam + "\\steam.exe").c_str(),
+                           nullptr, nullptr, SW_SHOWNORMAL);
+    return okk ? 1 : 0;
+}
+
 // ── install game ──
 bool install_game(const std::string& appid, const Paths& p) {
+    // DLL ставит только bst-fix (тихо), если набора ещё нет
+    if (dll_variant(p.steam) != 2) {
+        int nd = install_bst(p.steam);
+        ok("bst-fix: %d/1", nd);
+    }
     std::string dir = tmp_path() + "\\ost_" + appid;
     std::string zip = dir + "\\" + appid + ".zip";
     std::error_code ec;
